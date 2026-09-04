@@ -5,6 +5,7 @@ import {
   verifyTimestampFreshness,
   type JsonValue,
 } from '@/lib/deviceAuth'
+import { evaluate } from '@/lib/complianceEngine'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -21,10 +22,29 @@ type DeviceRow = {
   id: string
   is_active: boolean | null
   secret_hash: string | null
+  workzone_id: string | null
+}
+
+type WorkOrderRow = {
+  id: string
+  workzone_id: string | null
+}
+
+type WorkzoneRow = {
+  id: string
+  target_lat: number | null
+  target_lon: number | null
+  target_depth_meters: number | null
 }
 
 type ScanLogRow = {
   row_hash: string | null
+}
+
+type WorkzoneTarget = {
+  target_lat: number
+  target_lon: number
+  target_depth_meters: number
 }
 
 let cachedClient: SupabaseClient | null = null
@@ -54,6 +74,10 @@ function isUuid(value: unknown): value is string {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
     value
   )
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value)
 }
 
 function normalizeReadings(raw: unknown): JsonValue {
@@ -113,6 +137,57 @@ function jsonResponse(
   })
 }
 
+async function resolveWorkzoneTarget(
+  supabase: SupabaseClient,
+  workOrderId: string,
+  deviceWorkzoneId: string | null
+): Promise<WorkzoneTarget | null> {
+  const { data: workOrder, error: workOrderError } = await supabase
+    .from('work_orders')
+    .select('id, workzone_id')
+    .eq('id', workOrderId)
+    .maybeSingle<WorkOrderRow>()
+
+  if (workOrderError) {
+    throw new Error('work_order_lookup_failed')
+  }
+  if (!workOrder) {
+    return null
+  }
+
+  const workzoneId = workOrder.workzone_id ?? deviceWorkzoneId
+  if (!workzoneId) {
+    return null
+  }
+
+  const { data: workzone, error: workzoneError } = await supabase
+    .from('workzones')
+    .select('id, target_lat, target_lon, target_depth_meters')
+    .eq('id', workzoneId)
+    .maybeSingle<WorkzoneRow>()
+
+  if (workzoneError) {
+    throw new Error('workzone_lookup_failed')
+  }
+  if (!workzone) {
+    return null
+  }
+
+  if (
+    !isFiniteNumber(workzone.target_lat) ||
+    !isFiniteNumber(workzone.target_lon) ||
+    !isFiniteNumber(workzone.target_depth_meters)
+  ) {
+    return null
+  }
+
+  return {
+    target_lat: workzone.target_lat,
+    target_lon: workzone.target_lon,
+    target_depth_meters: workzone.target_depth_meters,
+  }
+}
+
 export async function POST(request: Request): Promise<Response> {
   let payload: IngestPayload
   try {
@@ -146,7 +221,7 @@ export async function POST(request: Request): Promise<Response> {
 
   const { data: device, error: deviceError } = await supabase
     .from('devices')
-    .select('id, is_active, secret_hash')
+    .select('id, is_active, secret_hash, workzone_id')
     .eq('id', device_id)
     .maybeSingle<DeviceRow>()
 
@@ -179,6 +254,47 @@ export async function POST(request: Request): Promise<Response> {
     return jsonResponse(401, { error: 'invalid_signature' })
   }
 
+  let target: WorkzoneTarget | null
+  try {
+    target = await resolveWorkzoneTarget(supabase, work_order_id, device.workzone_id)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'lookup_failed'
+    return jsonResponse(500, { error: message })
+  }
+  if (!target) {
+    return jsonResponse(404, { error: 'workzone_target_not_found' })
+  }
+
+  const telemetryRecord = (normalizedReadings ?? {}) as Record<string, unknown>
+  const h2sRaw = telemetryRecord.h2s_ppm
+  const o2Raw = telemetryRecord.o2_percent
+  const depthRaw = telemetryRecord.depth_meters
+  const batteryRaw = telemetryRecord.battery_percent
+  const isWarmingRaw = telemetryRecord.is_warming_up
+  const userLatRaw = telemetryRecord.user_lat
+  const userLonRaw = telemetryRecord.user_lon
+
+  const h2s = isFiniteNumber(h2sRaw) ? h2sRaw : Number(h2sRaw)
+  const o2 = isFiniteNumber(o2Raw) ? o2Raw : Number(o2Raw)
+  const depth = isFiniteNumber(depthRaw) ? depthRaw : Number(depthRaw)
+  const battery = isFiniteNumber(batteryRaw) ? batteryRaw : Number(batteryRaw)
+  const userLat = isFiniteNumber(userLatRaw) ? userLatRaw : Number(userLatRaw)
+  const userLon = isFiniteNumber(userLonRaw) ? userLonRaw : Number(userLonRaw)
+  const isWarming = typeof isWarmingRaw === 'boolean' ? isWarmingRaw : undefined
+
+  const compliance = evaluate(
+    {
+      h2s_ppm: h2s,
+      o2_percent: o2,
+      depth_meters: depth,
+      battery_percent: battery,
+      is_warming_up: isWarming,
+      user_lat: userLat,
+      user_lon: userLon,
+    },
+    target
+  )
+
   const { data: latest, error: latestError } = await supabase
     .from('scan_logs')
     .select('row_hash')
@@ -200,6 +316,7 @@ export async function POST(request: Request): Promise<Response> {
     device_id,
     work_order_id,
     readings: normalizedReadings,
+    decision: compliance.state,
     prev_hash: prevHash || null,
     row_hash: rowHash,
   })
@@ -212,5 +329,8 @@ export async function POST(request: Request): Promise<Response> {
     status: 'ok',
     row_hash: rowHash,
     prev_hash: prevHash,
+    decision: compliance.state,
+    compliance_reason: compliance.reason,
+    compliance_metrics: compliance.metrics,
   })
 }

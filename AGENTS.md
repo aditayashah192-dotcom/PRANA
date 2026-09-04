@@ -1,28 +1,32 @@
-\# AGENT.md — Phase 1C: Ingest Test Script
+\# AGENT.md — Phase 2D: Compliance Test Script
 
 
 
-\# AGENT.md — Phase 1D: ESP32 Firmware
+Create scripts/test-compliance.ts:
 
+1\. Standalone TypeScript test script executing 5 safety compliance test cases:
 
+&#x20;  - Case 1: All values normal, worker in geofence $\\rightarrow$ Expect SAFE.
 
-Create firmware/esp32\_prana.ino:
+&#x20;  - Case 2: $H\_2S > 15\\text{ ppm}$ spike $\\rightarrow$ Expect LOCKOUT.
 
-1\. Complete C++ Arduino/ESP32 sketch.
+&#x20;  - Case 3: Depth sensor mismatch (probe not inside manhole) $\\rightarrow$ Expect LOCKOUT.
 
-2\. Configured for gas reading sampling ($H\_2S$, $O\_2$), ultrasonic depth, and battery level.
+&#x20;  - Case 4: Missing or null sensor reading $\\rightarrow$ Expect LOCKOUT.
 
-3\. Implements HMAC SHA-256 payload signing using mbedtls/md.h before HTTP POST transmission.
-
-4\. Includes heartbeat loop and local memory ring buffer array for offline caching when Wi-Fi is unavailable.
+&#x20;  - Case 5: Telemetry outside 50m Haversine radius $\\rightarrow$ Expect LOCKOUT.
 
 
 
 STRICT RULE:
 
-\- Output ONLY firmware/esp32\_prana.ino. Write full C++ firmware code.
+\- Output ONLY scripts/test-compliance.ts. Write 100% complete test script code with clear terminal assertions.
 
 \-
+
+
+
+
 
 Test Fixture Completeness
 
