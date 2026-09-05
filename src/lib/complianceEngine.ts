@@ -73,6 +73,17 @@ export function evaluate(
     };
   }
 
+  if (is_warming_up !== true && is_warming_up !== false) {
+    return {
+      state: 'LOCKOUT',
+      reason: 'INVALID_OR_MISSING_SENSOR_DATA',
+      metrics: {
+        geofence_distance_m: 0,
+        depth_delta_m: 0,
+      },
+    };
+  }
+
   if (
     h2s_ppm < 0 ||
     o2_percent < 0 ||

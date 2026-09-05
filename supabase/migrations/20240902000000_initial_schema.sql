@@ -122,4 +122,4 @@ as $$
   where id = auth.uid()
 $$;
 
-grant execute on function public.get_my_contractor_id(), public.get_my_role() to public;
+grant execute on function public.get_my_contractor_id(), public.get_my_role() to authenticated;

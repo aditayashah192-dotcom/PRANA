@@ -292,6 +292,236 @@ async function main(): Promise<void> {
     )
   }
 
+  // ------------------------------------------------------------------
+  // Test 4: Top-level timestamp is populated on the inserted row.
+  // ------------------------------------------------------------------
+  {
+    const timestamp = Date.now()
+    const readings = { note: 'timestamp-test' }
+    const signedPayload = {
+      device_id: deviceId,
+      readings,
+      timestamp,
+      work_order_id: workOrderId,
+    }
+    const signature = signPayload(signedPayload, secret)
+
+    console.log('\n--- Test 4: top-level timestamp populated ---')
+    const { status } = await postIngest({
+      device_id: deviceId,
+      readings,
+      timestamp,
+      work_order_id: workOrderId,
+      signature,
+    })
+
+    const { data: rows, error: lookupErr } = await admin
+      .from('scan_logs')
+      .select('timestamp')
+      .eq('work_order_id', workOrderId)
+      .eq('device_id', deviceId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
+    const insertedTs = rows?.timestamp ?? null
+    const expectedIso = new Date(timestamp).toISOString()
+    const httpOk = status === 200
+    const insertedMs = insertedTs ? new Date(insertedTs).getTime() : NaN
+    const expectedMs = new Date(expectedIso).getTime()
+    const tsOk = !lookupErr && insertedMs === expectedMs
+
+    note(
+      'top-level timestamp is populated correctly',
+      httpOk && tsOk,
+      `http=${status}, timestamp=${insertedTs ?? 'null'} (expected ${expectedIso})`
+    )
+  }
+
+  // ------------------------------------------------------------------
+  // Test 5: Re-submitting the exact same packet is rejected as a
+  //         duplicate/replay with HTTP 409.
+  // ------------------------------------------------------------------
+  {
+    const timestamp = Date.now()
+    const readings = { note: 'replay-test' }
+    const signedPayload = {
+      device_id: deviceId,
+      readings,
+      timestamp,
+      work_order_id: workOrderId,
+    }
+    const signature = signPayload(signedPayload, secret)
+
+    console.log('\n--- Test 5: exact replay rejected ---')
+    const { status: status1 } = await postIngest({
+      device_id: deviceId,
+      readings,
+      timestamp,
+      work_order_id: workOrderId,
+      signature,
+    })
+
+    const { status: status2, json: json2 } = await postIngest({
+      device_id: deviceId,
+      readings,
+      timestamp,
+      work_order_id: workOrderId,
+      signature,
+    })
+
+    const firstAccepted = status1 === 200
+    const secondRejected = status2 === 409
+    const errorOk = (json2 as { error?: string } | null)?.error === 'duplicate_telemetry'
+
+    note(
+      'exact replay is rejected with HTTP 409',
+      firstAccepted && secondRejected && errorOk,
+      `first=${status1}, second=${status2}, error=${(json2 as { error?: string } | null)?.error ?? 'none'}`
+    )
+  }
+
+  // ------------------------------------------------------------------
+  // Test 6: Two concurrent submissions of the same packet cannot both
+  //         be accepted. Only one should succeed; the other must get 409.
+  // ------------------------------------------------------------------
+  {
+    const timestamp = Date.now()
+    const readings = { note: 'concurrent-test' }
+    const signedPayload = {
+      device_id: deviceId,
+      readings,
+      timestamp,
+      work_order_id: workOrderId,
+    }
+    const signature = signPayload(signedPayload, secret)
+
+    console.log('\n--- Test 6: concurrent duplicate rejected ---')
+    const [res1, res2] = await Promise.all([
+      postIngest({
+        device_id: deviceId,
+        readings,
+        timestamp,
+        work_order_id: workOrderId,
+        signature,
+      }),
+      postIngest({
+        device_id: deviceId,
+        readings,
+        timestamp,
+        work_order_id: workOrderId,
+        signature,
+      }),
+    ])
+
+    const results = [res1, res2]
+    const accepted = results.filter((r) => r.status === 200).length
+    const rejected = results.filter((r) => r.status === 409).length
+    const raceSafe = accepted === 1 && rejected === 1
+
+    note(
+      'concurrent duplicate: exactly one accepted, one rejected',
+      raceSafe,
+      `accepted=${accepted}, rejected=${rejected}, statuses=[${res1.status},${res2.status}]`
+    )
+  }
+
+  // ------------------------------------------------------------------
+  // Test 7: Two different valid telemetry packets are both accepted.
+  // ------------------------------------------------------------------
+  {
+    const timestamp1 = Date.now()
+    const readings1 = { note: 'packet-a', value: 1 }
+    const signedPayload1 = {
+      device_id: deviceId,
+      readings: readings1,
+      timestamp: timestamp1,
+      work_order_id: workOrderId,
+    }
+    const signature1 = signPayload(signedPayload1, secret)
+
+    const timestamp2 = timestamp1 + 1
+    const readings2 = { note: 'packet-b', value: 2 }
+    const signedPayload2 = {
+      device_id: deviceId,
+      readings: readings2,
+      timestamp: timestamp2,
+      work_order_id: workOrderId,
+    }
+    const signature2 = signPayload(signedPayload2, secret)
+
+    console.log('\n--- Test 7: two distinct packets both accepted ---')
+    const { status: status1 } = await postIngest({
+      device_id: deviceId,
+      readings: readings1,
+      timestamp: timestamp1,
+      work_order_id: workOrderId,
+      signature: signature1,
+    })
+
+    const { status: status2 } = await postIngest({
+      device_id: deviceId,
+      readings: readings2,
+      timestamp: timestamp2,
+      work_order_id: workOrderId,
+      signature: signature2,
+    })
+
+    const bothAccepted = status1 === 200 && status2 === 200
+
+    note(
+      'two distinct packets both accepted',
+      bothAccepted,
+      `first=${status1}, second=${status2}`
+    )
+  }
+
+  // ------------------------------------------------------------------
+  // Test 8: Hash-chain behavior remains intact after replay rejection.
+  // ------------------------------------------------------------------
+  {
+    const timestamp = Date.now()
+    const readings = { note: 'hashchain-test' }
+    const signedPayload = {
+      device_id: deviceId,
+      readings,
+      timestamp,
+      work_order_id: workOrderId,
+    }
+    const signature = signPayload(signedPayload, secret)
+
+    console.log('\n--- Test 8: hash-chain intact after replay rejection ---')
+    const { status: status1, json: json1 } = await postIngest({
+      device_id: deviceId,
+      readings,
+      timestamp,
+      work_order_id: workOrderId,
+      signature,
+    })
+
+    const { status: status2, json: json2 } = await postIngest({
+      device_id: deviceId,
+      readings,
+      timestamp,
+      work_order_id: workOrderId,
+      signature,
+    })
+
+    const firstRowHash = (json1 as { row_hash?: string } | null)?.row_hash ?? null
+    const secondRowHash = (json2 as { row_hash?: string } | null)?.row_hash ?? null
+
+    const firstAccepted = status1 === 200 && !!firstRowHash
+    const secondRejected = status2 === 409
+    const noRowHashOnReject = !secondRowHash
+    const hashChainIntact = firstAccepted && secondRejected && noRowHashOnReject
+
+    note(
+      'hash-chain intact after replay rejection',
+      hashChainIntact,
+      `first=${status1} rowHash=${firstRowHash?.slice(0, 16) ?? 'none'}..., second=${status2} rowHash=${secondRowHash ?? 'none'}`
+    )
+  }
+
   const failed = results.filter((r) => !r.passed)
   console.log(
     `\nSummary: ${results.length - failed.length}/${results.length} passed, ${failed.length} failed`

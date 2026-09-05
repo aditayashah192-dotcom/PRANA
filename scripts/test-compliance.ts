@@ -36,13 +36,14 @@ type TelemetryPayload = {
   o2_percent: number | null
   depth_meters: number | null
   battery_percent: number | null
+  is_warming_up?: boolean
   user_lat: number
   user_lon: number
 }
 
 type ComplianceCaseResult = {
   caseName: string;
-  expected: 'SAFE' | 'LOCKOUT';
+  expected: 'SAFE' | 'LOCKOUT' | 'WARMING';
   actualState: string | null;
   actualReason: string | null;
   passed: boolean;
@@ -241,7 +242,7 @@ function buildSignedIngest(args: {
 
 async function runCase(
   caseName: string,
-  expected: 'SAFE' | 'LOCKOUT',
+  expected: 'SAFE' | 'LOCKOUT' | 'WARMING',
   telemetry: TelemetryPayload,
   ctx: { deviceId: string; workOrderId: string; target: WorkzoneTarget; secret: string }
 ): Promise<ComplianceCaseResult> {
@@ -269,10 +270,14 @@ async function runCase(
   const actualReason = json.compliance_reason ?? null
   const stateOk = actualState === expected
 
-  const reasonOk =
-    expected === 'SAFE'
-      ? actualReason === 'ALL_SYSTEMS_NOMINAL'
-      : actualReason !== null && actualReason !== 'ALL_SYSTEMS_NOMINAL'
+  let reasonOk: boolean
+  if (expected === 'SAFE') {
+    reasonOk = actualReason === 'ALL_SYSTEMS_NOMINAL'
+  } else if (expected === 'WARMING') {
+    reasonOk = actualReason === 'SENSOR_WARMUP_IN_PROGRESS'
+  } else {
+    reasonOk = actualReason !== null && actualReason !== 'ALL_SYSTEMS_NOMINAL'
+  }
 
   const persisted = await admin
     .from('scan_logs')
@@ -309,6 +314,7 @@ async function main(): Promise<void> {
       o2_percent: 20.9,
       depth_meters: 3.0,
       battery_percent: 85.0,
+      is_warming_up: false,
       user_lat: target.target_lat,
       user_lon: target.target_lon,
     },
@@ -324,6 +330,7 @@ async function main(): Promise<void> {
       o2_percent: 20.9,
       depth_meters: 3.0,
       battery_percent: 85.0,
+      is_warming_up: false,
       user_lat: target.target_lat,
       user_lon: target.target_lon,
     },
@@ -339,6 +346,7 @@ async function main(): Promise<void> {
       o2_percent: 20.9,
       depth_meters: 5.0,
       battery_percent: 85.0,
+      is_warming_up: false,
       user_lat: target.target_lat,
       user_lon: target.target_lon,
     },
@@ -354,6 +362,7 @@ async function main(): Promise<void> {
       o2_percent: 20.9,
       depth_meters: 3.0,
       battery_percent: null,
+      is_warming_up: false,
       user_lat: target.target_lat,
       user_lon: target.target_lon,
     },
@@ -369,13 +378,77 @@ async function main(): Promise<void> {
       o2_percent: 20.9,
       depth_meters: 3.0,
       battery_percent: 85.0,
+      is_warming_up: false,
       user_lat: target.target_lat + 0.001,
       user_lon: target.target_lon + 0.001,
     },
     ctx
   )
 
-  const cases: ComplianceCaseResult[] = [case1, case2, case3, case4, case5]
+  console.log('\n--- Case 6: missing is_warming_up → LOCKOUT (fail-safe) ---')
+  const case6 = await runCase(
+    'Case 6: missing is_warming_up → LOCKOUT',
+    'LOCKOUT',
+    {
+      h2s_ppm: 2.0,
+      o2_percent: 20.9,
+      depth_meters: 3.0,
+      battery_percent: 85.0,
+      user_lat: target.target_lat,
+      user_lon: target.target_lon,
+    },
+    ctx
+  )
+
+  console.log('\n--- Case 7: explicit is_warming_up true → WARMING ---')
+  const case7 = await runCase(
+    'Case 7: is_warming_up=true → WARMING',
+    'WARMING',
+    {
+      h2s_ppm: 2.0,
+      o2_percent: 20.9,
+      depth_meters: 3.0,
+      battery_percent: 85.0,
+      is_warming_up: true,
+      user_lat: target.target_lat,
+      user_lon: target.target_lon,
+    },
+    ctx
+  )
+
+  console.log('\n--- Case 8: explicit is_warming_up false → SAFE ---')
+  const case8 = await runCase(
+    'Case 8: is_warming_up=false → SAFE',
+    'SAFE',
+    {
+      h2s_ppm: 2.0,
+      o2_percent: 20.9,
+      depth_meters: 3.0,
+      battery_percent: 85.0,
+      is_warming_up: false,
+      user_lat: target.target_lat,
+      user_lon: target.target_lon,
+    },
+    ctx
+  )
+
+  console.log('\n--- Case 9: invalid is_warming_up (string) → LOCKOUT ---')
+  const case9 = await runCase(
+    'Case 9: invalid is_warming_up="true" → LOCKOUT',
+    'LOCKOUT',
+    {
+      h2s_ppm: 2.0,
+      o2_percent: 20.9,
+      depth_meters: 3.0,
+      battery_percent: 85.0,
+      is_warming_up: 'true' as any,
+      user_lat: target.target_lat,
+      user_lon: target.target_lon,
+    },
+    ctx
+  )
+
+  const cases: ComplianceCaseResult[] = [case1, case2, case3, case4, case5, case6, case7, case8, case9]
 
   console.log('\n--- Compliance Case Results ---')
   for (const c of cases) {

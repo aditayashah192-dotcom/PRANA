@@ -1,0 +1,7 @@
+-- Phase 1.8: Composite index for latest telemetry per device
+-- Supports /api/telemetry/latest and similar lookups that filter by device_id
+-- and order by timestamp DESC.
+--
+-- NOTE: The actual index creation has been moved to a non-transactional
+-- migration (20240909000001_scan_logs_device_timestamp_index_concurrently.sql)
+-- because CREATE INDEX CONCURRENTLY cannot run inside a transaction block.

@@ -211,6 +211,8 @@ export async function POST(request: Request): Promise<Response> {
     return jsonResponse(400, { error: 'invalid_timestamp' })
   }
 
+  const timestampIso = new Date(timestamp).toISOString()
+
   const normalizedReadings = normalizeReadings(readings)
 
   if (!verifyTimestampFreshness(timestamp, 30)) {
@@ -311,6 +313,9 @@ export async function POST(request: Request): Promise<Response> {
   const rowHash = createHash('sha256')
     .update(prevHash + payloadString, 'utf8')
     .digest('hex')
+  const messageId = createHash('sha256')
+    .update(payloadString, 'utf8')
+    .digest('hex')
 
   const { error: insertError } = await supabase.from('scan_logs').insert({
     device_id,
@@ -319,9 +324,14 @@ export async function POST(request: Request): Promise<Response> {
     decision: compliance.state,
     prev_hash: prevHash || null,
     row_hash: rowHash,
+    timestamp: timestampIso,
+    message_id: messageId,
   })
 
   if (insertError) {
+    if (insertError.code === '23505') {
+      return jsonResponse(409, { error: 'duplicate_telemetry' })
+    }
     return jsonResponse(500, { error: 'insert_failed' })
   }
 

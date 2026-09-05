@@ -7,20 +7,32 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "test:rls": "tsx scripts/test-rls.ts"
+    "test:rls": "tsx scripts/test-rls.ts",
+    "test:ingest": "tsx scripts/test-ingest.ts",
+    "test:compliance": "tsx scripts/test-compliance.ts",
+    "test:assignments": "tsx scripts/test-assignments-permits.ts",
+    "test:telemetry": "tsx scripts/test-telemetry-latest.ts",
+    "test:field-supervisor": "tsx scripts/test-field-supervisor.ts",
+    "test:field-ui": "tsx scripts/test-field-ui.ts",
+    "test:field-operational": "tsx scripts/test-field-operational.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.5",
     "@supabase/supabase-js": "^2.114.0",
     "dotenv": "^17.4.2",
+    "leaflet": "^1.9.4",
     "next": "^16.3.4",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },
   "devDependencies": {
+    "@types/leaflet": "^1.9.22",
     "@types/node": "^26.4.1",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
+    "autoprefixer": "^10.5.5",
+    "postcss": "^8.5.28",
+    "tailwindcss": "^3.4.19",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2"
   }
