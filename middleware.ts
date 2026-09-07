@@ -58,7 +58,6 @@ export async function middleware(request: NextRequest) {
     .select('role')
     .eq('id', user.id)
     .maybeSingle()
-
   if (!profile || profileError) {
     return NextResponse.redirect(new URL('/unauthorized', request.url))
   }

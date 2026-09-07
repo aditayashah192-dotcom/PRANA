@@ -1,10 +1,10 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { createBrowserClient } from '@supabase/ssr'
 import { calculateHaversineDistance } from '@/utils/geoUtils'
 import StatusBanner from '@/components/telemetry/StatusBanner'
 import TelemetryGauges from '@/components/telemetry/TelemetryGauges'
+import { useAuthSession } from '@/lib/auth/useAuthSession'
 
 type SafetyState = 'SAFE' | 'WARMING' | 'UNKNOWN' | 'WARNING' | 'LOCKOUT'
 type FreshnessState = 'FRESH' | 'STALE' | 'MISSING' | 'AMBIGUOUS'
@@ -119,23 +119,31 @@ interface OverrideRow {
 
 interface AuditLogEntry {
   id: string
-  kind: 'permit_lifecycle' | 'manual_lockout' | 'two_person_override'
+  kind: 'permit_lifecycle' | 'manual_lockout' | 'two_person_override' | 'escalation_event'
   created_at: string
   actor_id: string
   summary: string
   detail: string
 }
 
+interface EscalationEventRow {
+  id: string
+  workzone_id: string
+  event_type: string
+  aggregate_state: string
+  aggregate_reason: string
+  trigger_source: string
+  previous_state: string | null
+  notification_channel: string | null
+  notification_status: string
+  notification_error: string | null
+  created_at: string
+}
+
 const POLL_INTERVAL_MS = 15000
 
 export default function FieldScanPage() {
-  const supabase = useMemo(() => createBrowserClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-  ), [])
-
-  const [user, setUser] = useState<{ id: string } | null>(null)
-  const [authLoading, setAuthLoading] = useState(true)
+  const { user, isLoading: authLoading, signOut, supabase } = useAuthSession()
 
   const [assignments, setAssignments] = useState<AssignmentRow[]>([])
   const [assignmentsLoading, setAssignmentsLoading] = useState(true)
@@ -185,23 +193,12 @@ export default function FieldScanPage() {
   const [auditLog, setAuditLog] = useState<AuditLogEntry[]>([])
   const [auditLogLoading, setAuditLogLoading] = useState(false)
 
+  const [escalationEvents, setEscalationEvents] = useState<EscalationEventRow[]>([])
+  const [escalationLoading, setEscalationLoading] = useState(false)
+
   const [permitStatus, setPermitStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
   const [permitError, setPermitError] = useState<string | null>(null)
   const [permitData, setPermitData] = useState<{ id: string; number: string } | null>(null)
-
-  // Auth
-  useEffect(() => {
-    let cancelled = false
-    const getUser = async () => {
-      const { data } = await supabase.auth.getUser()
-      if (!cancelled) {
-        setUser(data.user)
-        setAuthLoading(false)
-      }
-    }
-    getUser()
-    return () => { cancelled = true }
-  }, [supabase])
 
   // Load assignments
   useEffect(() => {
@@ -539,7 +536,37 @@ export default function FieldScanPage() {
     }
   }, [supabase, selectedAssignment])
 
-  // Load audit log for selected workzone (lifecycle + lockouts + overrides)
+  // Load escalation events for selected workzone
+  useEffect(() => {
+    if (!selectedAssignment) {
+      setEscalationEvents([])
+      return
+    }
+
+    let cancelled = false
+    const load = async () => {
+      setEscalationLoading(true)
+      const { data, error } = await supabase
+        .from('escalation_events')
+        .select('id, workzone_id, event_type, aggregate_state, aggregate_reason, trigger_source, previous_state, notification_channel, notification_status, notification_error, created_at')
+        .eq('workzone_id', selectedAssignment.workzone_id)
+        .order('created_at', { ascending: false })
+        .limit(20)
+
+      if (!cancelled) {
+        setEscalationEvents(((data ?? []) as EscalationEventRow[]))
+        setEscalationLoading(false)
+      }
+    }
+    load()
+    const interval = setInterval(load, POLL_INTERVAL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [supabase, selectedAssignment])
+
+  // Load audit log for selected workzone (lifecycle + lockouts + overrides + escalations)
   useEffect(() => {
     if (!selectedAssignment) {
       setAuditLog([])
@@ -550,7 +577,7 @@ export default function FieldScanPage() {
     const load = async () => {
       setAuditLogLoading(true)
 
-      const [permitsRes, lockoutsRes, overridesRes] = await Promise.all([
+      const [permitsRes, lockoutsRes, overridesRes, escalationsRes] = await Promise.all([
         supabase
           .from('permit_lifecycle_log')
           .select('id, permit_id, previous_status, new_status, performed_by, reason, created_at')
@@ -564,6 +591,12 @@ export default function FieldScanPage() {
         supabase
           .from('two_person_overrides')
           .select('id, requested_by, approved_by, status, reason, approval_reason, created_at')
+          .eq('workzone_id', selectedAssignment.workzone_id)
+          .order('created_at', { ascending: false })
+          .limit(20),
+        supabase
+          .from('escalation_events')
+          .select('id, event_type, aggregate_state, aggregate_reason, trigger_source, notification_status, notification_error, notification_channel, created_at')
           .eq('workzone_id', selectedAssignment.workzone_id)
           .order('created_at', { ascending: false })
           .limit(20),
@@ -636,6 +669,29 @@ export default function FieldScanPage() {
             actor_id: row.approved_by ?? row.requested_by,
             summary: `OVERRIDE ${row.status.toUpperCase()}`,
             detail: row.approval_reason ?? row.reason,
+          })
+        }
+      }
+
+      if (escalationsRes.data) {
+        for (const row of escalationsRes.data as Array<{
+          id: string
+          event_type: string
+          aggregate_state: string
+          aggregate_reason: string
+          trigger_source: string
+          notification_status: string
+          notification_error: string | null
+          notification_channel: string | null
+          created_at: string
+        }>) {
+          entries.push({
+            id: row.id,
+            kind: 'escalation_event',
+            created_at: row.created_at,
+            actor_id: 'system',
+            summary: `ESCALATION ${row.event_type} (${row.aggregate_state})`,
+            detail: `channel=${row.notification_channel ?? 'n/a'} status=${row.notification_status}${row.notification_error ? ` error=${row.notification_error}` : ''} source=${row.trigger_source}`,
           })
         }
       }
@@ -933,10 +989,19 @@ export default function FieldScanPage() {
   return (
     <div className="min-h-screen bg-slate-50 p-4">
       <div className="mx-auto max-w-lg space-y-4">
-        <header className="border-2 border-zinc-200 rounded-md bg-slate-900 px-4 py-3">
+        <header className="border-2 border-zinc-200 rounded-md bg-slate-900 px-4 py-3 flex items-center justify-between gap-4">
           <h1 className="text-lg font-bold font-mono uppercase tracking-wider text-slate-100">
             Field Supervisor Scan
           </h1>
+          {user && (
+            <button
+              type="button"
+              onClick={signOut}
+              className="border-2 border-zinc-200 rounded-md px-3 py-1 font-mono text-xs font-bold uppercase tracking-wider text-slate-100 bg-slate-800 hover:bg-slate-700"
+            >
+              Sign Out
+            </button>
+          )}
         </header>
 
         {/* Assigned Workzones */}
@@ -1014,12 +1079,51 @@ export default function FieldScanPage() {
                   state={authState.state.aggregate_state}
                   reason={authState.state.aggregate_reason}
                 />
-                <p className="font-mono text-[10px] text-slate-600">
-                  Freshness: {authState.state.freshness_state}
-                  {authState.state.latest_scan_timestamp
-                    ? ` | Updated: ${new Date(authState.state.latest_scan_timestamp).toLocaleString()}`
-                    : ''}
-                </p>
+                <div className="font-mono text-[10px] text-slate-600 space-y-1">
+                  <p>Freshness: <span className="font-bold uppercase">{authState.state.freshness_state}</span></p>
+                  {authState.state.latest_scan_timestamp && (
+                    <p>Updated: {new Date(authState.state.latest_scan_timestamp).toLocaleString()}</p>
+                  )}
+                  {authState.state.telemetry_age_seconds !== null && (
+                    <p>Age: {authState.state.telemetry_age_seconds}s</p>
+                  )}
+                </div>
+                {(authState.state.aggregate_state === 'LOCKOUT' || authState.state.aggregate_state === 'WARNING') && (
+                  <div className="grid grid-cols-2 gap-2 mt-2">
+                    {authState.state.latest_h2s_ppm !== null && (
+                      <div className="border-2 border-zinc-200 rounded-md p-2">
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-slate-700">H₂S</p>
+                        <p className={`text-sm font-mono font-bold ${Number(authState.state.latest_h2s_ppm) >= 15 ? 'text-red-700' : Number(authState.state.latest_h2s_ppm) >= 10 ? 'text-amber-700' : 'text-slate-900'}`}>{authState.state.latest_h2s_ppm} ppm</p>
+                      </div>
+                    )}
+                    {authState.state.latest_o2_percent !== null && (
+                      <div className="border-2 border-zinc-200 rounded-md p-2">
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-slate-700">O₂</p>
+                        <p className={`text-sm font-mono font-bold ${Number(authState.state.latest_o2_percent) <= 18.5 || Number(authState.state.latest_o2_percent) >= 24 ? 'text-red-700' : Number(authState.state.latest_o2_percent) <= 19.5 || Number(authState.state.latest_o2_percent) >= 23.5 ? 'text-amber-700' : 'text-slate-900'}`}>{authState.state.latest_o2_percent}%</p>
+                      </div>
+                    )}
+                    {authState.state.latest_depth_meters !== null && (
+                      <div className="border-2 border-zinc-200 rounded-md p-2">
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-slate-700">Depth</p>
+                        <p className="text-sm font-mono font-bold text-slate-900">{authState.state.latest_depth_meters} m</p>
+                      </div>
+                    )}
+                    {authState.state.latest_battery_percent !== null && (
+                      <div className="border-2 border-zinc-200 rounded-md p-2">
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-slate-700">Battery</p>
+                        <p className={`text-sm font-mono font-bold ${Number(authState.state.latest_battery_percent) < 10 ? 'text-red-700' : Number(authState.state.latest_battery_percent) < 20 ? 'text-amber-700' : 'text-slate-900'}`}>{authState.state.latest_battery_percent}%</p>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {authState.state.aggregate_state === 'UNKNOWN' && (
+                  <p className="font-mono text-[10px] text-slate-600 mt-1">
+                    {authState.state.freshness_state === 'MISSING' && 'No telemetry available for this workzone.'}
+                    {authState.state.freshness_state === 'STALE' && 'Telemetry is stale. Last reading exceeds freshness window.'}
+                    {authState.state.freshness_state === 'AMBIGUOUS' && 'Multiple active work orders have telemetry. Authority is ambiguous.'}
+                    {authState.state.freshness_state === 'FRESH' && 'Telemetry present but decision is unknown.'}
+                  </p>
+                )}
               </>
             )}
           </section>
@@ -1097,6 +1201,13 @@ export default function FieldScanPage() {
               Safety Permit
             </label>
 
+            {!canIssuePermit && authState && (
+              <div className="border-2 border-red-600 rounded-md bg-red-50 p-3">
+                <p className="font-mono text-sm font-bold text-red-700">PERMIT BLOCKED</p>
+                <p className="font-mono text-xs text-red-700">{permitBlockReason}</p>
+              </div>
+            )}
+
             <button
               type="button"
               onClick={handleIssuePermit}
@@ -1125,10 +1236,6 @@ export default function FieldScanPage() {
                 <p className="font-mono text-sm font-bold text-red-700">ISSUE FAILED</p>
                 <p className="font-mono text-xs text-red-700">{permitError}</p>
               </div>
-            )}
-
-            {permitBlockReason && !permitError && (
-              <p className="font-mono text-[10px] text-slate-600">{permitBlockReason}</p>
             )}
           </section>
         )}
@@ -1317,54 +1424,71 @@ export default function FieldScanPage() {
             {overrides.length === 0 ? (
               <p className="font-mono text-sm text-slate-700">No override requests.</p>
             ) : (
-              <table className="w-full border-2 border-zinc-200 rounded-md font-mono text-xs">
-                <thead className="bg-slate-100">
-                  <tr>
-                    <th className="text-left p-2">Requested</th>
-                    <th className="text-left p-2">Status</th>
-                    <th className="text-left p-2">Expires</th>
-                    <th className="text-left p-2">Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {overrides.map((o) => {
-                    const canApprove =
-                      o.status === 'pending' &&
-                      user !== null &&
-                      o.requested_by !== user.id
-                    return (
-                      <tr key={o.id} className="border-t border-zinc-200">
-                        <td className="p-2">{new Date(o.created_at).toLocaleString()}</td>
-                        <td className="p-2 font-bold uppercase tracking-wider">{o.status}</td>
-                        <td className="p-2 text-slate-600">
-                          {o.expires_at ? new Date(o.expires_at).toLocaleString() : '—'}
-                        </td>
-                        <td className="p-2">
-                          {canApprove ? (
-                            <button
-                              type="button"
-                              disabled={overrideStatus === 'loading'}
-                              onClick={() => {
-                                const reason = window.prompt('Approval reason?')
-                                if (reason && reason.trim()) {
-                                  handleApproveOverride(o.id, reason.trim())
-                                }
-                              }}
-                              className="border-2 border-zinc-200 rounded-md px-2 py-1 font-bold uppercase tracking-wider hover:bg-slate-50 disabled:opacity-50"
-                            >
-                              Approve
-                            </button>
-                          ) : o.status === 'pending' && o.requested_by === user?.id ? (
-                            <span className="text-slate-500">AWAITING SECOND</span>
-                          ) : (
-                            <span className="text-slate-500">—</span>
-                          )}
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
+              <div className="space-y-2">
+                {overrides.map((o) => {
+                  const canApprove =
+                    o.status === 'pending' &&
+                    user !== null &&
+                    o.requested_by !== user.id
+                  const isExpired = o.status === 'approved' && o.expires_at !== null && new Date(o.expires_at).getTime() <= Date.now()
+                  return (
+                    <div
+                      key={o.id}
+                      className={`border-2 rounded-md p-3 ${
+                        o.status === 'approved' && !isExpired
+                          ? 'border-emerald-600 bg-emerald-50'
+                          : o.status === 'pending'
+                            ? 'border-amber-500 bg-amber-50'
+                            : o.status === 'rejected' || o.status === 'expired'
+                              ? 'border-red-600 bg-red-50'
+                              : 'border-zinc-200 bg-white'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-bold uppercase tracking-wider text-slate-700">
+                          Status
+                        </span>
+                        <span className={`text-sm font-mono font-bold uppercase tracking-wider ${
+                          o.status === 'approved' && !isExpired
+                            ? 'text-emerald-700'
+                            : o.status === 'pending'
+                              ? 'text-amber-700'
+                              : 'text-red-700'
+                        }`}>
+                          {isExpired ? 'EXPIRED' : o.status.toUpperCase()}
+                        </span>
+                      </div>
+                      <div className="mt-2 space-y-1 text-xs font-mono text-slate-700">
+                        <p>Requested by: {o.requested_by?.slice(0, 8) ?? '—'}…</p>
+                        {o.approved_by && <p>Approved by: {o.approved_by.slice(0, 8)}…</p>}
+                        <p>Reason: {o.reason || o.request_reason || '—'}</p>
+                        {o.approval_reason && <p>Approval reason: {o.approval_reason}</p>}
+                        {o.expires_at && <p>Expires: {new Date(o.expires_at).toLocaleString()}</p>}
+                      </div>
+                      {canApprove && (
+                        <div className="mt-3">
+                          <button
+                            type="button"
+                            disabled={overrideStatus === 'loading'}
+                            onClick={() => {
+                              const reason = window.prompt('Approval reason?')
+                              if (reason && reason.trim()) {
+                                handleApproveOverride(o.id, reason.trim())
+                              }
+                            }}
+                            className="border-2 border-zinc-200 rounded-md px-3 py-2 font-mono text-sm font-bold uppercase tracking-wider text-slate-900 bg-white hover:bg-slate-50 disabled:opacity-50"
+                          >
+                            Approve Override
+                          </button>
+                        </div>
+                      )}
+                      {o.status === 'pending' && o.requested_by === user?.id && (
+                        <p className="mt-2 text-xs font-mono text-amber-700">Awaiting second approver</p>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
             )}
 
             <input
@@ -1389,6 +1513,59 @@ export default function FieldScanPage() {
             )}
             {overrideStatus === 'error' && (
               <p className="font-mono text-xs text-red-700">OVERRIDE ERROR: {overrideError}</p>
+            )}
+          </section>
+        )}
+
+        {/* Escalation Events */}
+        {selectedAssignment && (
+          <section className="border-2 border-zinc-200 rounded-md bg-white p-4 space-y-2">
+            <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
+              Escalation Events
+            </label>
+
+            {escalationLoading && escalationEvents.length === 0 ? (
+              <p className="font-mono text-sm text-slate-700">Loading escalation events...</p>
+            ) : escalationEvents.length === 0 ? (
+              <p className="font-mono text-sm text-slate-700">No escalation events.</p>
+            ) : (
+              <div className="space-y-2">
+                {escalationEvents.map((ev) => (
+                  <div
+                    key={ev.id}
+                    className={`border-2 rounded-md p-3 ${
+                      ev.aggregate_state === 'LOCKOUT'
+                        ? 'border-red-600 bg-red-50'
+                        : 'border-zinc-200 bg-white'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-bold uppercase tracking-wider text-slate-700">
+                        {ev.event_type}
+                      </span>
+                      <span className={`text-xs font-mono font-bold uppercase tracking-wider ${
+                        ev.notification_status === 'delivered' ? 'text-emerald-700' :
+                        ev.notification_status === 'failed' ? 'text-red-700' :
+                        'text-amber-700'
+                      }`}>
+                        {ev.notification_status.toUpperCase()}
+                      </span>
+                    </div>
+                    <div className="mt-2 space-y-1 text-xs font-mono text-slate-700">
+                      <p>State: <span className="font-bold uppercase">{ev.aggregate_state}</span></p>
+                      <p>Reason: {ev.aggregate_reason.replace(/_/g, ' ')}</p>
+                      <p>Trigger: {ev.trigger_source}</p>
+                      {ev.notification_channel && (
+                        <p>Channel: {ev.notification_channel}</p>
+                      )}
+                      {ev.notification_error && (
+                        <p className="text-red-700">Error: {ev.notification_error}</p>
+                      )}
+                      <p className="text-slate-600">{new Date(ev.created_at).toLocaleString()}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
             )}
           </section>
         )}
@@ -1418,7 +1595,12 @@ export default function FieldScanPage() {
                   {auditLog.slice(0, 20).map((e) => (
                     <tr key={`${e.kind}-${e.id}`} className="border-t border-zinc-200">
                       <td className="p-2 text-slate-600">{new Date(e.created_at).toLocaleString()}</td>
-                      <td className="p-2 uppercase tracking-wider">{e.kind.replace(/_/g, ' ')}</td>
+                      <td className={`p-2 uppercase tracking-wider ${
+                        e.kind === 'escalation_event' ? 'text-red-700' :
+                        e.kind === 'two_person_override' ? 'text-amber-700' :
+                        e.kind === 'manual_lockout' ? 'text-red-700' :
+                        'text-slate-700'
+                      }`}>{e.kind.replace(/_/g, ' ')}</td>
                       <td className="p-2 font-bold">{e.summary}</td>
                       <td className="p-2 text-slate-600">{e.actor_id.slice(0, 8)}…</td>
                       <td className="p-2">{e.detail}</td>

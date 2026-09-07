@@ -64,6 +64,17 @@ export const ReallocationPanel: React.FC<ReallocationPanelProps> = ({
 
   const selectedWorkzone = workzones.find((w) => w.id === workzoneId) ?? null
 
+  const isAllocation = selectedWorkzone ? !selectedWorkzone.contractor_id : false
+  const panelTitle = isAllocation ? 'WORKZONE_ALLOCATION' : 'WORKZONE_REALLOCATION'
+  const panelSubtitle =
+    'Government auditor assignment — server-side authorization'
+  const step2Label = isAllocation
+    ? 'STEP_2 — SELECT_CONTRACTOR_AND_REASON'
+    : 'STEP_2 — NEW_CONTRACTOR_AND_REASON'
+  const confirmLabel = isAllocation
+    ? 'ALLOCATE_WORKZONE'
+    : 'CONFIRM_REALLOCATION'
+
   const startOver = () => {
     setStep('idle')
     setWorkzoneId('')
@@ -97,8 +108,8 @@ export const ReallocationPanel: React.FC<ReallocationPanelProps> = ({
 
   return (
     <Panel
-      title="WORKZONE_REALLOCATION"
-      subtitle="Government auditor reassignment — server-side authorization"
+      title={panelTitle}
+      subtitle={panelSubtitle}
     >
       <div className="space-y-4">
         {successMessage ? (
@@ -173,7 +184,7 @@ export const ReallocationPanel: React.FC<ReallocationPanelProps> = ({
         {step !== 'idle' ? (
           <div className="space-y-3">
             <p className="font-mono text-[10px] font-bold uppercase tracking-wider text-amber-700">
-              STEP_2 — NEW_CONTRACTOR_AND_REASON
+              {step2Label}
             </p>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <div>
@@ -214,7 +225,7 @@ export const ReallocationPanel: React.FC<ReallocationPanelProps> = ({
                 disabled={submitting || !newContractorId || !reason.trim()}
                 loading={submitting}
               >
-                CONFIRM_REALLOCATION
+                {confirmLabel}
               </OpsButton>
               <OpsButton variant="secondary" onClick={startOver} disabled={submitting}>
                 CANCEL

@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { createBrowserClient } from '@supabase/ssr'
+import { useAuthSession } from '@/lib/auth/useAuthSession'
 import { Panel } from '@/components/govt/Panel'
 import { StatusBadge } from '@/components/govt/StatusBadge'
 import { MetricTile } from '@/components/govt/MetricTile'
@@ -72,13 +72,7 @@ type AuthoritativeState = {
 }
 
 export default function ContractorDashboardPage() {
-  const supabase = useMemo(() => createBrowserClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-  ), [])
-
-  const [user, setUser] = useState<{ id: string } | null>(null)
-  const [authLoading, setAuthLoading] = useState(true)
+  const { user, isLoading: authLoading, signOut, supabase } = useAuthSession()
   const [contractorId, setContractorId] = useState<string | null>(null)
 
   const [workzones, setWorkzones] = useState<WorkzoneRow[]>([])
@@ -107,19 +101,6 @@ export default function ContractorDashboardPage() {
   const [assignSuccess, setAssignSuccess] = useState<string | null>(null)
 
   const [workOrderIds, setWorkOrderIds] = useState<Set<string>>(new Set())
-
-  useEffect(() => {
-    let cancelled = false
-    const getUser = async () => {
-      const { data } = await supabase.auth.getUser()
-      if (!cancelled) {
-        setUser(data.user)
-        setAuthLoading(false)
-      }
-    }
-    getUser()
-    return () => { cancelled = true }
-  }, [supabase])
 
   useEffect(() => {
     if (!user) return
@@ -253,7 +234,7 @@ export default function ContractorDashboardPage() {
 
       if (!cancelled) {
         if (!error) {
-          setWorkOrderIds(new Set((data ?? []).map(wo => wo.id)))
+          setWorkOrderIds(new Set((data ?? []).map((wo: { id: string }) => wo.id)))
         }
       }
     }
@@ -455,6 +436,13 @@ export default function ContractorDashboardPage() {
           </div>
           <div className="shrink-0 flex items-center gap-2">
             <StatusBadge label="ROLE: CONTRACTOR_ADMIN" tone="amber" />
+            <button
+              type="button"
+              onClick={signOut}
+              className="border-2 border-zinc-200 rounded-md px-3 py-1 font-mono text-xs font-bold uppercase tracking-wider text-slate-100 bg-slate-800 hover:bg-slate-700"
+            >
+              Sign Out
+            </button>
           </div>
         </header>
 

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { createBrowserClient } from '@supabase/ssr'
+import { useAuthSession } from '@/lib/auth/useAuthSession'
 import { Panel } from '@/components/govt/Panel'
 import { StatusBadge } from '@/components/govt/StatusBadge'
 import { MetricTile } from '@/components/govt/MetricTile'
@@ -15,6 +16,7 @@ import type { WorkzoneState as AuthoritativeWorkzoneState } from '@/components/g
 import { WorkzoneTable } from '@/components/govt/WorkzoneTable'
 import { ContractorPanel } from '@/components/govt/ContractorPanel'
 import { ReallocationPanel } from '@/components/govt/ReallocationPanel'
+import { CreateWorkzonePanel } from '@/components/govt/CreateWorkzonePanel'
 import { PermitsPanel, PermitRowData } from '@/components/govt/PermitsPanel'
 import {
   AuditHistoryPanel,
@@ -24,6 +26,7 @@ import {
 import {
   TelemetryIntegrityPanel,
   IntegrityRow,
+  ChainVerificationResult,
 } from '@/components/govt/TelemetryIntegrityPanel'
 import { WorkzoneRowData, ContractorRowData, ContractorAllocation } from '@/components/govt/types'
 
@@ -85,17 +88,7 @@ function asArray<T>(value: T[] | T | null | undefined): T[] {
 }
 
 export default function GovtDashboardPage() {
-  const supabase = useMemo(
-    () =>
-      createBrowserClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-      ),
-    [],
-  )
-
-  const [user, setUser] = useState<{ id: string } | null>(null)
-  const [authLoading, setAuthLoading] = useState(true)
+  const { user, isLoading: authLoading, error: authError, signOut, supabase } = useAuthSession()
   const [roleError, setRoleError] = useState<string | null>(null)
 
   const [contractors, setContractors] = useState<ContractorRowData[]>([])
@@ -126,6 +119,11 @@ export default function GovtDashboardPage() {
   const [reallocSuccess, setReallocSuccess] = useState<string | null>(null)
   const [reallocError, setReallocError] = useState<string | null>(null)
   const [prefillWorkzoneId, setPrefillWorkzoneId] = useState<string | null>(null)
+
+  const [createSubmitting, setCreateSubmitting] = useState(false)
+  const [createSuccess, setCreateSuccess] = useState<string | null>(null)
+  const [createError, setCreateError] = useState<string | null>(null)
+
   const [refreshKey, setRefreshKey] = useState(0)
 
   const [authStates, setAuthStates] = useState<AuthoritativeWorkzoneState[]>([])
@@ -133,20 +131,9 @@ export default function GovtDashboardPage() {
   const [authStatesError, setAuthStatesError] = useState<string | null>(null)
   const [selectedAuthStateId, setSelectedAuthStateId] = useState<string | null>(null)
 
-  useEffect(() => {
-    let cancelled = false
-    const getUser = async () => {
-      const { data } = await supabase.auth.getUser()
-      if (!cancelled) {
-        setUser(data.user)
-        setAuthLoading(false)
-      }
-    }
-    getUser()
-    return () => {
-      cancelled = true
-    }
-  }, [supabase])
+  const [chainVerification, setChainVerification] = useState<ChainVerificationResult | null>(null)
+  const [chainLoading, setChainLoading] = useState(false)
+  const [chainError, setChainError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!user) return
@@ -508,13 +495,72 @@ export default function GovtDashboardPage() {
     setReallocError(null)
   }, [])
 
+  const handleDismissCreateMessages = useCallback(() => {
+    setCreateSuccess(null)
+    setCreateError(null)
+  }, [])
+
+  const handleSubmitCreateWorkzone = useCallback(
+    async (input: {
+      name: string
+      target_lat: number
+      target_lon: number
+      target_depth_meters: number
+      contractor_id?: string | null
+      reason?: string | null
+    }) => {
+      setCreateSubmitting(true)
+      setCreateError(null)
+      setCreateSuccess(null)
+      const { data, error } = await supabase.rpc('create_workzone', {
+        p_name: input.name,
+        p_target_lat: input.target_lat,
+        p_target_lon: input.target_lon,
+        p_target_depth_meters: input.target_depth_meters,
+        p_contractor_id: input.contractor_id ?? null,
+        p_reason: input.reason ?? null,
+      })
+      setCreateSubmitting(false)
+      if (error) {
+        setCreateError(error.message)
+      } else {
+        setCreateSuccess('Workzone created.')
+        setRefreshKey((k) => k + 1)
+      }
+    },
+    [supabase],
+  )
+
   const totalWorkzones = workzones.length
   const assignedCount = workzones.filter((w) => w.contractor_id).length
   const unassignedCount = totalWorkzones - assignedCount
   const activePermitCount = permits.filter((p) => p.status === 'ACTIVE').length
   const issuedPermitCount = permits.filter((p) => p.status === 'ISSUED').length
   const closedPermitCount = permits.filter((p) => p.status === 'CLOSED').length
-  const integrityAvailable = false
+  const integrityAvailable = true
+
+  const handleVerifyChain = useCallback(async () => {
+    setChainLoading(true)
+    setChainError(null)
+    try {
+      const res = await fetch('/api/govt/audit-chain/verify', {
+        method: 'GET',
+        credentials: 'same-origin',
+      })
+      if (!res.ok) {
+        setChainError(`HTTP ${res.status}`)
+        setChainVerification(null)
+        return
+      }
+      const json = (await res.json()) as ChainVerificationResult
+      setChainVerification(json)
+    } catch (err) {
+      setChainError((err as Error).message)
+      setChainVerification(null)
+    } finally {
+      setChainLoading(false)
+    }
+  }, [])
 
   // Backend-derived authoritative safety state distribution.
   const safeCount = authStates.filter(
@@ -589,6 +635,13 @@ export default function GovtDashboardPage() {
             <StatusBadge label="ROLE: GOVT_AUDITOR" tone="amber" />
             <StatusBadge label="OVERSIGHT" tone="emerald" />
             <StatusBadge label="NOT FIELD OPS" tone="zinc" />
+            <button
+              type="button"
+              onClick={signOut}
+              className="border-2 border-zinc-200 rounded-md px-3 py-1 font-mono text-xs font-bold uppercase tracking-wider text-slate-100 bg-slate-800 hover:bg-slate-700"
+            >
+              Sign Out
+            </button>
           </div>
         </header>
 
@@ -730,6 +783,7 @@ export default function GovtDashboardPage() {
                     )?.name ?? null
                   }
                   loading={authStatesLoading}
+                  onAction={handleReallocateFromTable}
                 />
                 <MapLegend />
               </div>
@@ -742,6 +796,11 @@ export default function GovtDashboardPage() {
           subtitle="All workzones across contractors"
           noPadding
           density="dense"
+          actions={
+            <OpsButton size="sm" variant="primary" onClick={() => { setCreateSuccess(null); setCreateError(null) }}>
+              ADD_WORKZONE
+            </OpsButton>
+          }
         >
           <div className="p-3">
             <WorkzoneTable
@@ -752,6 +811,15 @@ export default function GovtDashboardPage() {
             />
           </div>
         </Panel>
+
+        <CreateWorkzonePanel
+          contractors={contractors}
+          submitting={createSubmitting}
+          successMessage={createSuccess}
+          errorMessage={createError}
+          onSubmit={handleSubmitCreateWorkzone}
+          onDismissMessages={handleDismissCreateMessages}
+        />
 
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
           <Panel
@@ -835,6 +903,10 @@ export default function GovtDashboardPage() {
         >
           <TelemetryIntegrityPanel
             integrityAvailable={integrityAvailable}
+            chainVerification={chainVerification}
+            chainLoading={chainLoading}
+            chainError={chainError}
+            onVerify={handleVerifyChain}
             rows={devices}
             loading={devicesLoading}
             errorMessage={devicesError}

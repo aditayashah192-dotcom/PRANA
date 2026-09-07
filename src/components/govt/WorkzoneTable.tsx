@@ -100,7 +100,7 @@ export const WorkzoneTable: React.FC<WorkzoneTableProps> = ({
                         variant="primary"
                         onClick={() => onReallocate(row.id)}
                       >
-                        REALLOCATE
+                        {row.contractor_id ? 'REALLOCATE' : 'ALLOCATE CONTRACTOR'}
                       </OpsButton>
                     </td>
                   ) : null}

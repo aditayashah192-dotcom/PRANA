@@ -1,56 +1,92 @@
-\# AGENT.md — Phase 2D: Compliance Test Script
+PROJECT PRANA — CONTRACTOR ADMIN: ASSIGN FIELD SUPERVISOR
 
+Implement ONLY the missing Contractor Admin workflow for assigning a Field Supervisor to a workzone.
 
+IMPORTANT:
+The backend `assign_field_supervisor()` SECURITY DEFINER RPC was previously implemented. Reuse it. Do NOT create a duplicate RPC, duplicate assignment table, or alternate authorization path.
 
-Create scripts/test-compliance.ts:
+FIRST inspect the current implementation and existing Contractor Admin dashboard to understand what already exists.
 
-1\. Standalone TypeScript test script executing 5 safety compliance test cases:
+Required workflow:
 
-&#x20;  - Case 1: All values normal, worker in geofence $\\rightarrow$ Expect SAFE.
+Contractor Admin
+→ sees their contractor's workzones
+→ selects a workzone
+→ `ASSIGN FIELD SUPERVISOR`
+→ sees eligible Field Supervisors from the SAME contractor
+→ selects one
+→ assignment is performed through existing `assign_field_supervisor()`
+→ UI confirms success
+→ assigned supervisor is displayed
+→ Field Supervisor subsequently sees the assigned workzone
 
-&#x20;  - Case 2: $H\_2S > 15\\text{ ppm}$ spike $\\rightarrow$ Expect LOCKOUT.
+Security requirements:
+- Contractor Admin only.
+- Caller must be authorized server-side.
+- Field Supervisor must belong to the SAME contractor as the workzone.
+- Cannot assign another contractor's Field Supervisor.
+- Cannot assign arbitrary users/non-field-supervisors.
+- Do not trust client-side role/tenant checks.
+- Do not use service-role credentials in the browser.
+- Preserve existing RLS and SECURITY DEFINER authorization.
+- Do not weaken any existing policies.
 
-&#x20;  - Case 3: Depth sensor mismatch (probe not inside manhole) $\\rightarrow$ Expect LOCKOUT.
+UI:
+- Add an obvious `ASSIGN FIELD SUPERVISOR` control to the existing Contractor Admin workzone UI.
+- Make the assignment workzone-specific.
+- Show ONLY eligible Field Supervisors belonging to the Contractor Admin's contractor.
+- Show the currently assigned supervisor if one exists.
+- If the existing RPC supports reassignment, expose reassignment appropriately; otherwise do not invent new semantics.
+- Show clear success/error states.
+- Follow the existing Project Prana industrial/utility UI style.
+- Do not redesign the dashboard.
 
-&#x20;  - Case 4: Missing or null sensor reading $\\rightarrow$ Expect LOCKOUT.
+Tests:
+- Contractor Admin can assign a same-contractor Field Supervisor.
+- Contractor Admin cannot assign a Field Supervisor from another contractor.
+- Contractor Admin cannot assign a non-field-supervisor user.
+- Non-Contractor-Admin cannot perform the assignment.
+- Assigned Field Supervisor sees the workzone.
+- Other/unassigned Field Supervisor does not see it.
+- Existing RLS/security tests remain passing.
 
-&#x20;  - Case 5: Telemetry outside 50m Haversine radius $\\rightarrow$ Expect LOCKOUT.
+Run:
+- `tsc`
+- build
+- existing Contractor Admin tests
+- existing Field Supervisor/RLS tests
+- any focused test needed for the new UI flow
 
+Manual verification:
+1. Login as Contractor Admin.
+2. Open Contractor dashboard.
+3. Select a workzone.
+4. Click `ASSIGN FIELD SUPERVISOR`.
+5. Select the appropriate same-contractor Field Supervisor.
+6. Confirm assignment.
+7. Login as that Field Supervisor.
+8. Confirm the workzone appears.
+9. Confirm another Field Supervisor cannot see the unassigned workzone.
 
+SCOPE CONTROL:
+DO NOT TOUCH:
+- authentication/session/middleware
+- Government Auditor workzone creation/allocation
+- PayPal
+- hash-chain verifier
+- permit issuance
+- lockout/escalation
+- telemetry safety logic
+- unrelated dashboards/features
 
-STRICT RULE:
+Do not modify the existing backend authorization unless inspection proves it is actually incorrect.
 
-\- Output ONLY scripts/test-compliance.ts. Write 100% complete test script code with clear terminal assertions.
+Do not commit.
 
-\-
-
-
-
-
-
-Test Fixture Completeness
-
-
-
-Whenever a phase or segment creates or modifies a database-backed feature:
-
-
-
-\- Do not assume manually seeded database rows exist unless explicitly specified.
-
-\- Every automated test must create or identify its own complete test fixtures.
-
-\- Test fixtures must satisfy all "NOT NULL", foreign-key, CHECK, unique, and other database constraints.
-
-\- Before writing a test INSERT, inspect the current schema/migration and existing application code to determine all required fields and their correct representations.
-
-\- Do not solve test-fixture failures by manually modifying database rows.
-
-\- Do not weaken or alter production schema constraints merely to make tests pass.
-
-\- If a required fixture value cannot be determined from the schema, migrations, existing code, or phase specification, stop and report the ambiguity instead of guessing.
-
-\- Tests must be repeatable from a fresh local database after "supabase db reset"; they must not depend on state left by a previous test run.
-
-\- When a test requires related records, the test must create the complete dependency chain or use an explicitly documented fixture setup.
-
+Final report:
+1. What already existed
+2. What was missing
+3. Files changed
+4. Tests/results
+5. Manual verification result
+6. Any remaining gap

@@ -11,10 +11,15 @@
     "test:ingest": "tsx scripts/test-ingest.ts",
     "test:compliance": "tsx scripts/test-compliance.ts",
     "test:assignments": "tsx scripts/test-assignments-permits.ts",
+    "test:contractor-admin": "tsx scripts/test-contractor-admin.ts",
     "test:telemetry": "tsx scripts/test-telemetry-latest.ts",
     "test:field-supervisor": "tsx scripts/test-field-supervisor.ts",
     "test:field-ui": "tsx scripts/test-field-ui.ts",
-    "test:field-operational": "tsx scripts/test-field-operational.ts"
+    "test:field-operational": "tsx scripts/test-field-operational.ts",
+    "test:escalation": "tsx scripts/test-escalation.ts",
+    "test:auth": "tsx scripts/test-auth-session.ts",
+    "test:audit-chain": "tsx scripts/test-audit-chain.ts",
+    "verify:audit-chain": "tsx scripts/verify-audit-chain.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.5",

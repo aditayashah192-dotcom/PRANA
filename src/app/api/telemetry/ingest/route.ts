@@ -1,11 +1,9 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { createHash } from 'crypto'
-import {
-  verifyDeviceHmac,
-  verifyTimestampFreshness,
-  type JsonValue,
-} from '@/lib/deviceAuth'
+import { verifyDeviceHmac, verifyTimestampFreshness, type JsonValue } from '@/lib/deviceAuth'
+import { canonicalize } from '@/lib/canonicalize'
 import { evaluate } from '@/lib/complianceEngine'
+import { getTestNotificationProvider } from '@/lib/notifications'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -105,26 +103,6 @@ function normalizeReadings(raw: unknown): JsonValue {
     return result
   }
   return null
-}
-
-function canonicalize(value: JsonValue): string {
-  if (value === null) {
-    return 'null'
-  }
-  if (Array.isArray(value)) {
-    return '[' + value.map(canonicalize).join(',') + ']'
-  }
-  if (typeof value === 'object') {
-    const keys = Object.keys(value).sort()
-    return (
-      '{' +
-      keys
-        .map((k) => JSON.stringify(k) + ':' + canonicalize(value[k]))
-        .join(',') +
-      '}'
-    )
-  }
-  return JSON.stringify(value)
 }
 
 function jsonResponse(
@@ -333,6 +311,86 @@ export async function POST(request: Request): Promise<Response> {
       return jsonResponse(409, { error: 'duplicate_telemetry' })
     }
     return jsonResponse(500, { error: 'insert_failed' })
+  }
+
+  if (compliance.state === 'LOCKOUT') {
+    try {
+      const { data: woRow } = await supabase
+        .from('work_orders')
+        .select('workzone_id')
+        .eq('id', work_order_id)
+        .maybeSingle<{ workzone_id: string | null }>()
+
+      const targetWorkzoneId = woRow?.workzone_id ?? device.workzone_id
+
+      if (targetWorkzoneId) {
+        const oneHourAgo = new Date(Date.now() - 3600 * 1000).toISOString()
+        const { data: existingEvent } = await supabase
+          .from('escalation_events')
+          .select('id')
+          .eq('workzone_id', targetWorkzoneId)
+          .eq('notification_status', 'pending')
+          .gt('created_at', oneHourAgo)
+          .maybeSingle<{ id: string }>()
+
+        if (!existingEvent) {
+          const provider = getTestNotificationProvider()
+          const { data: eventData, error: eventError } = await supabase
+            .from('escalation_events')
+            .insert({
+              workzone_id: targetWorkzoneId,
+              event_type: 'LOCKOUT_ENTERED',
+              aggregate_state: 'LOCKOUT',
+              aggregate_reason: compliance.reason,
+              trigger_source: 'telemetry',
+              previous_state: null,
+              notification_status: 'pending',
+            })
+            .select('id')
+            .single<{ id: string }>()
+
+          if (!eventError && eventData) {
+            const channels: Array<{ channel: 'buzzer' | 'sms'; send: () => Promise<{ status: string; error?: string }> }> = [
+              {
+                channel: 'buzzer',
+                send: async () => {
+                  const res = await provider.sendBuzzerNotification(targetWorkzoneId)
+                  return { status: res.status, error: res.error }
+                },
+              },
+              {
+                channel: 'sms',
+                send: async () => {
+                  const res = await provider.sendSmsNotification(targetWorkzoneId, [])
+                  return { status: res.status, error: res.error }
+                },
+              },
+            ]
+
+            for (const { channel, send } of channels) {
+              let delivery: { status: string; error?: string }
+              try {
+                const res = await send()
+                delivery = { status: res.status, error: res.error }
+              } catch (err) {
+                delivery = { status: 'failed', error: err instanceof Error ? err.message : 'unknown_error' }
+              }
+
+              await supabase
+                .from('escalation_events')
+                .update({
+                  notification_channel: channel,
+                  notification_status: delivery.status,
+                  notification_error: delivery.error ?? null,
+                })
+                .eq('id', eventData.id)
+            }
+          }
+        }
+      }
+    } catch {
+      console.error('escalation trigger failed')
+    }
   }
 
   return jsonResponse(200, {

@@ -3,11 +3,13 @@
 import { StatusBadge } from './StatusBadge'
 import { DataState } from './DataState'
 import type { WorkzoneState as WorkzoneStateT } from './WorkzoneMap'
+import { OpsButton } from './OpsButton'
 
 export interface WorkzoneDetailPanelProps {
   workzone: WorkzoneStateT | null
   contractorName: string | null
   loading?: boolean
+  onAction?: (workzoneId: string) => void
 }
 
 const SAFETY_TONE: Record<string, 'emerald' | 'amber' | 'red' | 'slate'> = {
@@ -39,6 +41,7 @@ export const WorkzoneDetailPanel: React.FC<WorkzoneDetailPanelProps> = ({
   workzone,
   contractorName,
   loading = false,
+  onAction,
 }) => {
   if (loading) {
     return (
@@ -96,6 +99,17 @@ export const WorkzoneDetailPanel: React.FC<WorkzoneDetailPanelProps> = ({
                 tone={unassigned ? 'amber' : 'emerald'}
               />
             </div>
+            {onAction && workzone ? (
+              <div className="mt-2">
+                <OpsButton
+                  size="sm"
+                  variant={unassigned ? 'primary' : 'secondary'}
+                  onClick={() => onAction(workzone.workzone_id)}
+                >
+                  {unassigned ? 'ALLOCATE CONTRACTOR' : 'REALLOCATE'}
+                </OpsButton>
+              </div>
+            ) : null}
           </div>
           <div
             className={[

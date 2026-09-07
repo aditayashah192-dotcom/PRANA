@@ -21,6 +21,7 @@ if (!SERVICE_ROLE_KEY) {
 const PASSWORDS = {
   tenantAAdmin: 'Prana-TenantA-Admin-2026!',
   tenantAFieldA: 'Prana-TenantA-FieldA-2026!',
+  tenantAFieldB: 'Prana-TenantA-FieldB-2026!',
   tenantBField: 'Prana-TenantB-Field-2026!',
   gov: 'Prana-Govt-Auditor-2026!',
 }
@@ -28,6 +29,7 @@ const PASSWORDS = {
 const EMAILS = {
   tenantAAdmin: 'tenant-a-admin@prana.test',
   tenantAFieldA: 'tenant-a-field-a@prana.test',
+  tenantAFieldB: 'tenant-a-field-b@prana.test',
   tenantBField: 'tenant-b-field@prana.test',
   gov: 'govt-auditor@prana.test',
 }
@@ -182,6 +184,9 @@ async function main(): Promise<void> {
   const tenantAFieldA = await ensureUser(EMAILS.tenantAFieldA, PASSWORDS.tenantAFieldA, 'field_supervisor', contractorA)
   cleanup.users.push(tenantAFieldA)
 
+  const tenantAFieldB = await ensureUser(EMAILS.tenantAFieldB, PASSWORDS.tenantAFieldB, 'field_supervisor', contractorA)
+  cleanup.users.push(tenantAFieldB)
+
   const tenantBField = await ensureUser(EMAILS.tenantBField, PASSWORDS.tenantBField, 'field_supervisor', contractorB)
   cleanup.users.push(tenantBField)
 
@@ -324,12 +329,86 @@ async function main(): Promise<void> {
     note(
       'contractor_admin cannot assign another contractor supervisor',
       blocked,
+       blocked ? `blocked (${error?.message})` : 'assignment unexpectedly succeeded'
+    )
+  }
+
+  // ==========================================================================
+  // 5. Non-Contractor-Admin cannot call the assignment RPC
+  // ==========================================================================
+  {
+    const client = await signInAs(EMAILS.tenantAFieldA, PASSWORDS.tenantAFieldA)
+    const { error } = await client.rpc('assign_field_supervisor', {
+      p_workzone_id: wzA2.id,
+      p_assigned_staff_id: tenantAFieldB,
+    })
+
+    const blocked = !!error
+    note(
+      'non-contractor_admin cannot call assign_field_supervisor RPC',
+      blocked,
+      blocked ? `blocked (${error?.message})` : 'RPC unexpectedly succeeded'
+    )
+  }
+
+  // ==========================================================================
+  // 6. Contractor Admin cannot assign a non-field-supervisor user
+  // ==========================================================================
+  {
+    const client = await signInAs(EMAILS.tenantAAdmin, PASSWORDS.tenantAAdmin)
+    const { error } = await client.rpc('assign_field_supervisor', {
+      p_workzone_id: wzA2.id,
+      p_assigned_staff_id: gov,
+    })
+
+    const blocked = !!error
+    note(
+      'contractor_admin cannot assign non-field-supervisor user',
+      blocked,
       blocked ? `blocked (${error?.message})` : 'assignment unexpectedly succeeded'
     )
   }
 
   // ==========================================================================
-  // 5. Historical audit remains immutable (scan_logs UPDATE/DELETE blocked)
+  // 7. Assigned field supervisor sees the workzone via RPC assignment
+  // ==========================================================================
+  {
+    const client = await signInAs(EMAILS.tenantAFieldA, PASSWORDS.tenantAFieldA)
+    const { data, error } = await client
+      .from('workzones')
+      .select('id, name')
+      .eq('id', wzA1.id)
+      .maybeSingle()
+
+    const ok = !error && !!data && data.id === wzA1.id
+    note(
+      'assigned field supervisor sees assigned workzone via RPC',
+      ok,
+      ok ? `workzone=${data!.name}` : `data=${JSON.stringify(data)} err=${error?.message ?? 'none'}`
+    )
+  }
+
+  // ==========================================================================
+  // 8. Unassigned field supervisor does not see the workzone
+  // ==========================================================================
+  {
+    const client = await signInAs(EMAILS.tenantAFieldB, PASSWORDS.tenantAFieldB)
+    const { data, error } = await client
+      .from('workzones')
+      .select('id, name')
+      .eq('id', wzA1.id)
+      .maybeSingle()
+
+    const blocked = !data && !error
+    note(
+      'unassigned field supervisor does not see assigned workzone',
+      blocked,
+      `data=${JSON.stringify(data)} err=${error?.message ?? 'none'}`
+    )
+  }
+
+  // ==========================================================================
+  // 9. Historical audit remains immutable (scan_logs UPDATE/DELETE blocked)
   // ==========================================================================
   {
     const scanRes = await admin
