@@ -54,7 +54,11 @@ interface TelemetryRow {
   id: string
   device_id: string
   work_order_id: string | null
-  readings: Record<string, unknown>
+  timestamp: number | null
+  h2s: number | null
+  o2: number | null
+  depth: number | null
+  battery: number | null
   created_at: string
   decision: string | null
   compliance_reason: string | null
@@ -164,6 +168,11 @@ export default function FieldScanPage() {
   const [telemetry, setTelemetry] = useState<TelemetryRow | null>(null)
   const [telemetryLoading, setTelemetryLoading] = useState(false)
   const [telemetryError, setTelemetryError] = useState<string | null>(null)
+  // CH4/UV are display-only and not part of the SAFE/WARNING/LOCKOUT decision.
+  // /api/telemetry/latest doesn't expose them, so they're read directly off
+  // the scan_logs row (RLS already permits this for an assigned field supervisor).
+  const [ch4, setCh4] = useState<number | null>(null)
+  const [uvIndex, setUvIndex] = useState<number | null>(null)
 
   const [authState, setAuthState] = useState<AuthoritativeState | null>(null)
   const [authStateLoading, setAuthStateLoading] = useState(false)
@@ -318,6 +327,25 @@ export default function FieldScanPage() {
           setTelemetry(json)
           setTelemetryLoading(false)
         }
+
+        // Supplementary read for CH4/UV only: /api/telemetry/latest doesn't
+        // expose them, so fetch the raw readings jsonb directly (existing RLS
+        // already allows this device's assigned field supervisor to read it).
+        const { data: rawLog } = await supabase
+          .from('scan_logs')
+          .select('readings')
+          .eq('device_id', deviceId)
+          .order('timestamp', { ascending: false, nullsFirst: false })
+          .limit(1)
+          .maybeSingle()
+
+        if (!cancelled) {
+          const rawReadings = (rawLog as { readings?: Record<string, unknown> } | null)?.readings
+          const rawCh4 = rawReadings?.ch4_ppm
+          setCh4(typeof rawCh4 === 'number' && Number.isFinite(rawCh4) ? rawCh4 : null)
+          const rawUv = rawReadings?.uv_index
+          setUvIndex(typeof rawUv === 'number' && Number.isFinite(rawUv) ? rawUv : null)
+        }
       } catch (err) {
         if (!cancelled) {
           setTelemetryError(err instanceof Error ? err.message : 'Unknown telemetry error')
@@ -332,7 +360,7 @@ export default function FieldScanPage() {
       cancelled = true
       clearInterval(interval)
     }
-  }, [deviceId, selectedAssignment, selectedWorkOrder])
+  }, [deviceId, selectedAssignment, selectedWorkOrder, supabase])
 
   // Fetch authoritative workzone state from backend
   useEffect(() => {
@@ -940,11 +968,10 @@ export default function FieldScanPage() {
 
   const telemetryValues = useMemo(() => {
     if (!telemetry) return null
-    const readings = telemetry.readings ?? {}
-    const h2s = typeof readings.h2s_ppm === 'number' ? readings.h2s_ppm : null
-    const o2 = typeof readings.o2_percent === 'number' ? readings.o2_percent : null
-    const depth = typeof readings.depth_meters === 'number' ? readings.depth_meters : null
-    const battery = typeof readings.battery_percent === 'number' ? readings.battery_percent : null
+    const h2s = telemetry.h2s
+    const o2 = telemetry.o2
+    const depth = telemetry.depth
+    const battery = telemetry.battery
 
     if (h2s === null || o2 === null || depth === null || battery === null) {
       return null
@@ -955,12 +982,14 @@ export default function FieldScanPage() {
       o2,
       depth,
       battery,
+      ch4,
+      uvIndex,
       targetDepth: (() => {
         const wz = selectedAssignment ? getWorkzone(selectedAssignment) : null
         return wz ? wz.target_depth_meters : 0
       })(),
     }
-  }, [telemetry, selectedAssignment])
+  }, [telemetry, selectedAssignment, ch4, uvIndex])
 
   if (authLoading) {
     return (
@@ -1185,6 +1214,8 @@ export default function FieldScanPage() {
                   depth={telemetryValues.depth}
                   battery={telemetryValues.battery}
                   targetDepth={telemetryValues.targetDepth}
+                  ch4={telemetryValues.ch4}
+                  uvIndex={telemetryValues.uvIndex}
                 />
                 <p className="font-mono text-[10px] text-slate-600">
                   Updated: {telemetry.created_at ? new Date(telemetry.created_at).toLocaleString() : '--'}

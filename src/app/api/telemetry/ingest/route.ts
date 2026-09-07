@@ -21,11 +21,13 @@ type DeviceRow = {
   is_active: boolean | null
   secret_hash: string | null
   workzone_id: string | null
+  contractor_id: string | null
 }
 
 type WorkOrderRow = {
   id: string
   workzone_id: string | null
+  contractor_id: string | null
 }
 
 type WorkzoneRow = {
@@ -118,11 +120,12 @@ function jsonResponse(
 async function resolveWorkzoneTarget(
   supabase: SupabaseClient,
   workOrderId: string,
-  deviceWorkzoneId: string | null
+  deviceWorkzoneId: string | null,
+  deviceContractorId: string | null
 ): Promise<WorkzoneTarget | null> {
   const { data: workOrder, error: workOrderError } = await supabase
     .from('work_orders')
-    .select('id, workzone_id')
+    .select('id, workzone_id, contractor_id')
     .eq('id', workOrderId)
     .maybeSingle<WorkOrderRow>()
 
@@ -131,6 +134,14 @@ async function resolveWorkzoneTarget(
   }
   if (!workOrder) {
     return null
+  }
+
+  // A device may only submit telemetry against a work order belonging to
+  // its own contractor. Without this check, a validly-signed device from
+  // one contractor could inject readings into another contractor's work
+  // order/workzone.
+  if (workOrder.contractor_id !== deviceContractorId) {
+    throw new Error('unauthorized_work_order')
   }
 
   const workzoneId = workOrder.workzone_id ?? deviceWorkzoneId
@@ -201,7 +212,7 @@ export async function POST(request: Request): Promise<Response> {
 
   const { data: device, error: deviceError } = await supabase
     .from('devices')
-    .select('id, is_active, secret_hash, workzone_id')
+    .select('id, is_active, secret_hash, workzone_id, contractor_id')
     .eq('id', device_id)
     .maybeSingle<DeviceRow>()
 
@@ -236,9 +247,12 @@ export async function POST(request: Request): Promise<Response> {
 
   let target: WorkzoneTarget | null
   try {
-    target = await resolveWorkzoneTarget(supabase, work_order_id, device.workzone_id)
+    target = await resolveWorkzoneTarget(supabase, work_order_id, device.workzone_id, device.contractor_id)
   } catch (err) {
     const message = err instanceof Error ? err.message : 'lookup_failed'
+    if (message === 'unauthorized_work_order') {
+      return jsonResponse(403, { error: message })
+    }
     return jsonResponse(500, { error: message })
   }
   if (!target) {

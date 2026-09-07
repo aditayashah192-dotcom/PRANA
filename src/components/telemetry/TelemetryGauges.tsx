@@ -6,6 +6,13 @@ export interface TelemetryGaugesProps {
   depth: number;
   battery: number;
   targetDepth: number;
+  // Display-only: not part of the SAFE/WARNING/LOCKOUT decision (that
+  // remains h2s/o2/depth/battery, computed server-side). Derived from the
+  // same MQ-2 sensor as h2s via a separate curve fit — there is no
+  // dedicated CH4 sensor. Optional because older scan_logs rows won't have it.
+  ch4?: number | null;
+  // Display-only, non-authoritative. Not part of the required API contract.
+  uvIndex?: number | null;
 }
 
 type Severity = 'nominal' | 'warning' | 'critical';
@@ -29,6 +36,12 @@ const O2_HIGH_CRIT_PCT = 24.0;
 
 const BATTERY_WARN_PCT = 20;
 const BATTERY_CRIT_PCT = 10;
+
+// Display-only placeholder bands, not calibrated against a specific sensor
+// and not evaluated by the compliance engine. Adjust once the CH4 sensor's
+// datasheet curve is known.
+const CH4_WARN_PPM = 500;
+const CH4_CRIT_PPM = 1000;
 
 const DEPTH_TOLERANCE_M = 0.5;
 
@@ -138,6 +151,13 @@ const classifyO2 = (o2: number): Severity => {
   return 'nominal';
 };
 
+const classifyCh4 = (ch4: number): Severity => {
+  if (!Number.isFinite(ch4)) return 'critical';
+  if (ch4 >= CH4_CRIT_PPM) return 'critical';
+  if (ch4 >= CH4_WARN_PPM) return 'warning';
+  return 'nominal';
+};
+
 const classifyBattery = (battery: number): Severity => {
   if (!Number.isFinite(battery)) return 'critical';
   if (battery < BATTERY_CRIT_PCT) return 'critical';
@@ -158,11 +178,16 @@ export const TelemetryGauges: React.FC<TelemetryGaugesProps> = ({
   depth,
   battery,
   targetDepth,
+  ch4,
+  uvIndex,
 }) => {
   const h2sSeverity = classifyH2s(h2s);
   const o2Severity = classifyO2(o2);
   const depthSeverity = classifyDepth(depth, targetDepth);
   const batterySeverity = classifyBattery(battery);
+  const hasCh4 = typeof ch4 === 'number' && Number.isFinite(ch4);
+  const ch4Severity = hasCh4 ? classifyCh4(ch4 as number) : 'nominal';
+  const hasUv = typeof uvIndex === 'number' && Number.isFinite(uvIndex);
 
   const depthDelta = Number.isFinite(depth) && Number.isFinite(targetDepth)
     ? depth - targetDepth
@@ -206,6 +231,24 @@ export const TelemetryGauges: React.FC<TelemetryGaugesProps> = ({
         severity={batterySeverity}
         hint={`warn <${BATTERY_WARN_PCT}% / crit <${BATTERY_CRIT_PCT}%`}
       />
+      {hasCh4 ? (
+        <MetricCard
+          label="CH₄"
+          value={formatNumber(ch4 as number, 1)}
+          unit="ppm"
+          severity={ch4Severity}
+          hint="derived from MQ-2 — not part of lockout decision"
+        />
+      ) : null}
+      {hasUv ? (
+        <MetricCard
+          label="UV"
+          value={formatNumber(uvIndex as number, 1)}
+          unit="idx"
+          severity="nominal"
+          hint="display only — not part of lockout decision"
+        />
+      ) : null}
     </div>
   );
 };

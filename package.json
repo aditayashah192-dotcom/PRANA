@@ -19,7 +19,9 @@
     "test:escalation": "tsx scripts/test-escalation.ts",
     "test:auth": "tsx scripts/test-auth-session.ts",
     "test:audit-chain": "tsx scripts/test-audit-chain.ts",
-    "verify:audit-chain": "tsx scripts/verify-audit-chain.ts"
+    "verify:audit-chain": "tsx scripts/verify-audit-chain.ts",
+    "provision:device": "tsx scripts/provision-device.ts",
+    "test:cross-tenant-ingest": "tsx scripts/test-cross-tenant-ingest.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.5",

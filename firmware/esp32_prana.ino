@@ -3,21 +3,36 @@
  *
  * PRANA field scanning device firmware.
  *
- * Samples on-board gas sensors (H2S, O2), an ultrasonic depth transducer,
- * and the battery level. Readings are signed with HMAC-SHA256 using the
- * device secret provisioned in the backend and POSTed to the scan_logs
- * ingestion endpoint. While Wi-Fi is unavailable the signed payloads are
- * retained in an in-RAM ring buffer and flushed on the next connection.
+ * Physical sensors actually present on this prototype: MQ-2, MQ-135, a UV
+ * sensor, an HC-SR04 ultrasonic depth transducer, and an active buzzer.
+ * There is no dedicated O2 sensor, no CH4 sensor, no GPS module, and no
+ * battery ADC circuit — see the readings-derivation notes below for how
+ * each required API field is produced from what's actually wired up.
+ *
+ * Readings are signed with HMAC-SHA256 and POSTed to the
+ * /api/telemetry/ingest endpoint, matching the payload contract in
+ * src/app/api/telemetry/ingest/route.ts exactly:
+ *
+ *   { device_id, work_order_id, timestamp (ms epoch), readings, signature }
+ *
+ * signature = hex(HMAC-SHA256(canonical_json({device_id, readings,
+ *   timestamp, work_order_id}), key = DEVICE_SECRET))
+ * where canonical_json sorts object keys alphabetically at every level,
+ * mirroring src/lib/canonicalize.ts on the server.
+ *
+ * While Wi-Fi is unavailable, signed payloads are retained in an in-RAM
+ * FIFO ring buffer and flushed in order on the next connection, without
+ * ever regenerating their original signed timestamp.
  */
 
 #include <WiFi.h>
 #include <HTTPClient.h>
-#include <ArduinoJson.h>
+#include <time.h>
 #include <mbedtls/md.h>
 
 // ---------------------------------------------------------------------------
 // Compile-time / runtime configuration.
-// Override via build flags or environment variables before flashing.
+// Fill these in per-device before flashing (see provisioning script output).
 // ---------------------------------------------------------------------------
 
 #ifndef WIFI_SSID
@@ -28,59 +43,132 @@
 #define WIFI_PASSWORD "prana-wifi-pass"
 #endif
 
+// Must be reachable over the internet from this device (NTP + HTTPS both
+// need it). A phone hotspot is fine for testing.
 #ifndef API_BASE_URL
-#define API_BASE_URL "https://api.prana.example.com"
+#define API_BASE_URL "https://prana-steel-one.vercel.app"
 #endif
 
+// Must exactly match the `secret_hash` column value for this device's row
+// in the `devices` table (see scripts/provision-device.ts).
 #ifndef DEVICE_SECRET
-#define DEVICE_SECRET "super-secret-device-key"
+#define DEVICE_SECRET "REPLACE_WITH_PROVISIONED_DEVICE_SECRET"
 #endif
 
-#ifndef DEVICE_SERIAL
-#define DEVICE_SERIAL "PRH-0001"
+// UUID of this device's row in `devices`.
+#ifndef DEVICE_ID
+#define DEVICE_ID "REPLACE_WITH_DEVICE_UUID"
 #endif
 
-// Hardware pin assignments (adjust to board wiring).
-#define H2S_SENSOR_PIN       34      // Analog gas sensor (H2S)
-#define O2_SENSOR_PIN          35      // Analog gas sensor (O2)
-#define BATTERY_MONITOR_PIN    32      // Voltage divider -> ADC
-#define ULTRASONIC_TRIGGER_PIN 18
-#define ULTRASONIC_ECHO_PIN    19
+// UUID of the active `work_orders` row this device reports against.
+#ifndef WORK_ORDER_ID
+#define WORK_ORDER_ID "REPLACE_WITH_WORK_ORDER_UUID"
+#endif
+
+// This probe has no GPS module. It is a fixed installation at the
+// workzone's target coordinates, so we report the target location as our
+// own position. Replace with the actual workzones.target_lat/target_lon
+// for this device's workzone.
+#ifndef PROBE_LAT
+#define PROBE_LAT 28.6139
+#endif
+#ifndef PROBE_LON
+#define PROBE_LON 77.2090
+#endif
+
+// Hardware pin assignments — do not move these without updating this
+// comment and confirming with whoever owns the physical wiring.
+#define MQ2_SENSOR_PIN         34      // MQ-2: source for both h2s_ppm and ch4_ppm
+#define MQ135_SENSOR_PIN       35      // MQ-135: source for o2_percent (placeholder, not real O2 sensing)
+#define UV_SENSOR_PIN          33      // UV sensor: display-only, not part of any safety gate
+#define ULTRASONIC_TRIGGER_PIN 5
+#define ULTRASONIC_ECHO_PIN    18
+#define BUZZER_PIN             19      // Local advisory failsafe only — never authoritative
 
 // ADC characteristics for the ESP32 (12-bit, 0..3.3V, attenuation set by pin).
 #define ADC_BITS               12
 #define ADC_MAX                4095.0f
 #define ADC_REF_VOLTAGE        3.3f
-#define BATTERY_DIVIDER_RATIO  2.0f   // R1+R2 / R2 for the voltage divider
+
+// No battery ADC circuit exists on this prototype. Sending a fabricated
+// voltage-derived percentage would misrepresent nonexistent hardware, so we
+// send an honest fixed placeholder instead. Replace with a real circuit
+// (and real conversion) once one is added.
+#define BATTERY_PERCENT_PLACEHOLDER 100.0f
 
 // Timing constants.
-#define HEARTBEAT_INTERVAL_MS    30000      // 30s heartbeat
+#define HEARTBEAT_INTERVAL_MS    30000      // 30s heartbeat (serial log only)
 #define SAMPLING_INTERVAL_MS     10000      // 10s between full sample cycles
 #define WIFI_CONNECT_TIMEOUT_MS  15000      // max time to wait for Wi-Fi
+#define NTP_SYNC_TIMEOUT_MS      15000      // max time to wait for NTP
+#define WARMUP_DURATION_MS       60000      // sensors report is_warming_up=true for this long after boot
 #define RING_BUFFER_SIZE         64         // offline cache slots
+#define BUZZER_BEEP_ON_MS        200        // intermittent-beep on-time
+#define BUZZER_BEEP_OFF_MS       800        // intermittent-beep off-time
+
+// ---------------------------------------------------------------------------
+// Local advisory safety thresholds.
+//
+// These mirror src/lib/complianceEngine.ts's numeric thresholds so the
+// buzzer gives a sane local indication while offline. This is NOT a second
+// source of authorization — the server remains the sole authority for
+// permits and lockouts. If the two ever disagree (e.g. after a server-side
+// threshold change), the server wins; this only drives a local sound.
+// ---------------------------------------------------------------------------
+
+#define LOCAL_H2S_WARN_PPM   10.0f
+#define LOCAL_H2S_CRIT_PPM   15.0f
+#define LOCAL_O2_LOW_CRIT    18.5f
+#define LOCAL_O2_LOW_WARN    19.5f
+#define LOCAL_O2_HIGH_WARN   23.5f
+#define LOCAL_O2_HIGH_CRIT   24.0f
+#define LOCAL_DEPTH_TOLERANCE_M 0.5f
+
+typedef enum {
+  LOCAL_SAFE,
+  LOCAL_WARMING,
+  LOCAL_WARNING,
+  LOCAL_LOCKOUT,
+  LOCAL_UNKNOWN
+} LocalSafetyState;
 
 // ---------------------------------------------------------------------------
 // Runtime state
 // ---------------------------------------------------------------------------
 
-static const char* ssid       = WIFI_SSID;
+static const char* ssid         = WIFI_SSID;
 static const char* wifiPassword = WIFI_PASSWORD;
-static const char* apiBaseUrl  = API_BASE_URL;
-
-// Device identity provisioned by the backend. In production these would come
-// from efused/secure storage; here we use build defaults.
+static const char* apiBaseUrl   = API_BASE_URL;
 static const char* deviceSecret = DEVICE_SECRET;
-static const char* deviceSerial = DEVICE_SERIAL;
+static const char* deviceId     = DEVICE_ID;
+static const char* workOrderId  = WORK_ORDER_ID;
 
+static unsigned long bootMillis = 0;
 static unsigned long lastHeartbeat = 0;
 static unsigned long lastSample = 0;
+static bool timeSynced = false;
+
+// Last known-good ultrasonic reading, used if a sample fails (no echo).
+static float lastGoodDepthCM = -1.0f;
+
+// Target depth for this workzone, used only for the local advisory depth
+// check that feeds the buzzer. Matches the workzone row for WORK_ORDER_ID.
+#ifndef TARGET_DEPTH_METERS
+#define TARGET_DEPTH_METERS 3.0f
+#endif
+
+// Buzzer pattern state (non-blocking). currentLocalState persists between
+// sample cycles so the intermittent beep pattern keeps ticking every loop().
+static unsigned long buzzerPatternStart = 0;
+static bool buzzerOn = false;
+static LocalSafetyState currentLocalState = LOCAL_UNKNOWN;
 
 // ---------------------------------------------------------------------------
-// Offline ring buffer for signed payloads.
+// Offline ring buffer for signed request bodies.
 // ---------------------------------------------------------------------------
 
 typedef struct {
-  char payload[512];
+  char body[768];
   bool occupied;
 } RingSlot;
 
@@ -89,160 +177,16 @@ static size_t ringHead = 0;
 static size_t ringTail = 0;
 static size_t ringCount = 0;
 
-// ---------------------------------------------------------------------------
-// Utility: base64 helper for signatures (avoids a heavy dependency).
-// ---------------------------------------------------------------------------
-
-static const char* b64Table =
-  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-static String base64Encode(const uint8_t* data, size_t len) {
-  String out;
-  out.reserve(((len + 2) / 3) * 4);
-  for (size_t i = 0; i < len; i += 3) {
-    uint32_t v = (uint32_t)data[i] << 16;
-    int rem = 1;
-    if (i + 1 < len) { v |= (uint32_t)data[i + 1] << 8; rem = 2; }
-    if (i + 2 < len) { v |= (uint32_t)data[i + 2]; rem = 3; }
-    out += b64Table[(v >> 18) & 0x3F];
-    out += b64Table[(v >> 12) & 0x3F];
-    out += (rem > 1) ? b64Table[(v >> 6) & 0x3F] : '=';
-    out += (rem > 2) ? b64Table[v & 0x3F] : '=';
-  }
-  return out;
-}
-
-// ---------------------------------------------------------------------------
-// HMAC-SHA256 signing using mbedtls.
-// ---------------------------------------------------------------------------
-
-static String hmacSha256(const char* key, const char* message) {
-  const size_t keyLen = strlen(key);
-  const size_t msgLen = strlen(message);
-
-  uint8_t digest[32];
-  const mbedtls_md_info_t* mdInfo = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
-  if (mdInfo == nullptr) {
-    return "";
-  }
-
-  int ret = mbedtls_md_hmac(mdInfo,
-                            (const unsigned char*)key, keyLen,
-                            (const unsigned char*)message, msgLen,
-                            digest);
-  if (ret != 0) {
-    return "";
-  }
-
-  return base64Encode(digest, sizeof(digest));
-}
-
-// ---------------------------------------------------------------------------
-// Sensor sampling
-// ---------------------------------------------------------------------------
-
-static float readBatteryVoltage() {
-  uint16_t raw = analogRead(BATTERY_MONITOR_PIN);
-  float voltage = ((float)raw / ADC_MAX) * ADC_REF_VOLTAGE * BATTERY_DIVIDER_RATIO;
-  return voltage;
-}
-
-static float readAnalogSensorVoltage(int pin) {
-  uint32_t sum = 0;
-  // Simple 16-sample moving average to reduce sensor noise.
-  for (int i = 0; i < 16; i++) {
-    sum += analogRead(pin);
-    delay(2);
-  }
-  uint16_t avg = sum / 16;
-  float voltage = ((float)avg / ADC_MAX) * ADC_REF_VOLTAGE;
-  return voltage;
-}
-
-// H2S ppm estimate. The common discrete H2S sensors (e.g. MQ-137) output a
-// voltage proportional to gas concentration. This maps voltage -> ppm using a
-// reference slope. Replace with your sensor's characteristic curve as needed.
-static float sampleH2SPPM() {
-  float v = readAnalogSensorVoltage(H2S_SENSOR_PIN);
-  // Rough 0.18V baseline -> 0 ppm, 0.36V -> 10 ppm, etc.
-  float ppm = (v - 0.18f) * 50.0f;
-  if (ppm < 0) ppm = 0;
-  return ppm;
-}
-
-// O2 % estimate. The O2 sensor (e.g. MQ135 variant) reads ~0.3V at 0% and
-// ~2.0V at 21% O2; linear interpolation applied here.
-static float sampleO2Percent() {
-  float v = readAnalogSensorVoltage(O2_SENSOR_PIN);
-  float percent = ((v - 0.3f) / (2.0f - 0.3f)) * 21.0f;
-  if (percent < 0) percent = 0;
-  if (percent > 25) percent = 25;
-  return percent;
-}
-
-// Ultrasonic depth in centimeters. Measures distance to the fluid surface;
-// caller interprets against tank geometry for true "depth".
-static float sampleUltrasonicDepthCM() {
-  digitalWrite(ULTRASONIC_TRIGGER_PIN, LOW);
-  delayMicroseconds(2);
-  digitalWrite(ULTRASONIC_TRIGGER_PIN, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(ULTRASONIC_TRIGGER_PIN, LOW);
-
-  long duration = pulseIn(ULTRASONIC_ECHO_PIN, HIGH, 30000L);
-  // Sound speed ~343 m/s -> 29.1 us/cm round-trip.
-  float distanceCM = duration / 58.2f;
-  if (duration == 0) {
-    return -1.0f; // no echo detected
-  }
-  return distanceCM;
-}
-
-// ---------------------------------------------------------------------------
-// Payload construction + HMAC signing.
-// ---------------------------------------------------------------------------
-
-static String buildAndSignPayload(float h2sPPM, float o2Percent,
-                                  float depthCM, float batteryV,
-                                  unsigned long ts) {
-  // Build the JSON readings payload first, then sign it.
-  StaticJsonDocument<384> doc;
-  doc["device_serial"] = deviceSerial;
-  doc["timestamp"] = (uint64_t)ts;
-  doc["readings"]["h2s_ppm"] = h2sPPM;
-  doc["readings"]["o2_percent"] = o2Percent;
-  doc["readings"]["depth_cm"] = depthCM;
-  doc["readings"]["battery_v"] = batteryV;
-
-  String jsonPayload;
-  serializeJson(doc, jsonPayload);
-
-  String signature = hmacSha256(deviceSecret, jsonPayload.c_str());
-
-  // Final transmission body: payload + signature.
-  StaticJsonDocument<512> out;
-  out["payload"] = jsonPayload;
-  out["signature"] = signature;
-
-  String output;
-  serializeJson(out, output);
-  return output;
-}
-
-// ---------------------------------------------------------------------------
-// Ring buffer management for offline caching.
-// ---------------------------------------------------------------------------
-
-static bool ringBufferPush(const String& signedPayload) {
-  if (signedPayload.length() >= sizeof(RingSlot::payload)) {
+static bool ringBufferPush(const String& body) {
+  if (body.length() >= sizeof(RingSlot::body)) {
     return false;
   }
   if (ringCount >= RING_BUFFER_SIZE) {
-    return false; // buffer full, drop oldest implicitly by overwriting tail
+    return false;
   }
   size_t idx = ringHead;
   ringBuffer[idx].occupied = true;
-  signedPayload.toCharArray(ringBuffer[idx].payload, sizeof(RingSlot::payload));
+  body.toCharArray(ringBuffer[idx].body, sizeof(RingSlot::body));
   ringHead = (ringHead + 1) % RING_BUFFER_SIZE;
   ringCount++;
   return true;
@@ -253,7 +197,7 @@ static bool ringBufferPop(String& out) {
     return false;
   }
   size_t idx = ringTail;
-  out = String(ringBuffer[idx].payload);
+  out = String(ringBuffer[idx].body);
   ringBuffer[idx].occupied = false;
   ringTail = (ringTail + 1) % RING_BUFFER_SIZE;
   ringCount--;
@@ -263,13 +207,245 @@ static bool ringBufferPop(String& out) {
 static void ringBufferClear() {
   for (size_t i = 0; i < RING_BUFFER_SIZE; i++) {
     ringBuffer[i].occupied = false;
-    ringBuffer[i].payload[0] = '\0';
+    ringBuffer[i].body[0] = '\0';
   }
   ringHead = ringTail = ringCount = 0;
 }
 
 // ---------------------------------------------------------------------------
-// Wi-Fi + HTTP
+// Canonical JSON number formatting.
+//
+// The server verifies signatures by re-parsing our JSON into JS numbers and
+// re-serializing them with JSON.stringify, which prints the *shortest*
+// decimal string that round-trips to the same double (no trailing zeros, no
+// unnecessary decimal point for whole numbers). We replicate that here so
+// our locally-computed HMAC matches what the server recomputes.
+// ---------------------------------------------------------------------------
+
+static String canonicalNumber(double value) {
+  if (value == (long long)value && fabs(value) < 1e15) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%lld", (long long)value);
+    return String(buf);
+  }
+  char buf[40];
+  for (int precision = 1; precision <= 9; precision++) {
+    snprintf(buf, sizeof(buf), "%.*f", precision, value);
+    if (strtod(buf, nullptr) == value) {
+      String s(buf);
+      int dot = s.indexOf('.');
+      if (dot >= 0) {
+        int end = s.length();
+        while (end > dot + 2 && s[end - 1] == '0') end--;
+        s = s.substring(0, end);
+      }
+      return s;
+    }
+  }
+  snprintf(buf, sizeof(buf), "%.9f", value);
+  return String(buf);
+}
+
+// ---------------------------------------------------------------------------
+// HMAC-SHA256 (hex output) using mbedtls.
+// ---------------------------------------------------------------------------
+
+static String hmacSha256Hex(const char* key, const String& message) {
+  uint8_t digest[32];
+  const mbedtls_md_info_t* mdInfo = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  if (mdInfo == nullptr) {
+    return "";
+  }
+  int ret = mbedtls_md_hmac(
+    mdInfo,
+    (const unsigned char*)key, strlen(key),
+    (const unsigned char*)message.c_str(), message.length(),
+    digest
+  );
+  if (ret != 0) {
+    return "";
+  }
+  static const char* hex = "0123456789abcdef";
+  String out;
+  out.reserve(64);
+  for (int i = 0; i < 32; i++) {
+    out += hex[(digest[i] >> 4) & 0xF];
+    out += hex[digest[i] & 0xF];
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Sensor sampling
+// ---------------------------------------------------------------------------
+
+static float readAnalogSensorVoltage(int pin) {
+  uint32_t sum = 0;
+  for (int i = 0; i < 16; i++) {
+    sum += analogRead(pin);
+    delay(2);
+  }
+  uint16_t avg = sum / 16;
+  return ((float)avg / ADC_MAX) * ADC_REF_VOLTAGE;
+}
+
+// H2S ppm estimate from MQ-2. Prototype-grade curve, not a certified
+// measurement — MQ-2 is not a true H2S-specific sensor.
+static float sampleH2SPPM(float mq2Voltage) {
+  float ppm = (mq2Voltage - 0.18f) * 50.0f;
+  if (ppm < 0) ppm = 0;
+  return ppm;
+}
+
+// CH4 ppm estimate, derived from the SAME MQ-2 reading as H2S above (no
+// dedicated CH4 sensor exists on this prototype). MQ-2's datasheet is
+// actually more sensitive to combustible gases like methane/LPG than H2S,
+// so this uses a separate, steeper curve applied to the same voltage.
+// Display-only: not evaluated by the compliance engine.
+static float sampleCH4PPM(float mq2Voltage) {
+  float ppm = (mq2Voltage - 0.2f) * 400.0f;
+  if (ppm < 0) ppm = 0;
+  return ppm;
+}
+
+// O2 % placeholder derived from MQ-135. MQ-135 is not an O2 sensor; this is
+// the agreed prototype placeholder pending real electrochemical O2 hardware.
+static float sampleO2Percent() {
+  float v = readAnalogSensorVoltage(MQ135_SENSOR_PIN);
+  float percent = ((v - 0.3f) / (2.0f - 0.3f)) * 21.0f;
+  if (percent < 0) percent = 0;
+  if (percent > 25) percent = 25;
+  return percent;
+}
+
+// UV index estimate (e.g. ML8511-style sensor). Extra, non-authoritative
+// field — not part of the required API contract, sent for display/logging
+// only. Calibrate against your specific sensor's datasheet.
+static float sampleUVIndex() {
+  float v = readAnalogSensorVoltage(UV_SENSOR_PIN);
+  float index = (v - 1.0f) * 3.0f;
+  if (index < 0) index = 0;
+  return index;
+}
+
+// Ultrasonic depth in centimeters. Returns -1 if no echo detected.
+static float sampleUltrasonicDepthCM() {
+  digitalWrite(ULTRASONIC_TRIGGER_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(ULTRASONIC_TRIGGER_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(ULTRASONIC_TRIGGER_PIN, LOW);
+
+  long duration = pulseIn(ULTRASONIC_ECHO_PIN, HIGH, 30000L);
+  if (duration == 0) {
+    return -1.0f;
+  }
+  return duration / 58.2f; // ~343 m/s speed of sound -> 29.1 us/cm round-trip
+}
+
+// ---------------------------------------------------------------------------
+// Local advisory safety state (buzzer only — never gates permits).
+// ---------------------------------------------------------------------------
+
+static LocalSafetyState computeLocalState(float h2s, float o2, float depthMeters,
+                                          bool isWarmingUp) {
+  if (!isfinite(h2s) || !isfinite(o2) || !isfinite(depthMeters)) {
+    return LOCAL_UNKNOWN;
+  }
+
+  float depthDelta = fabs(depthMeters - TARGET_DEPTH_METERS);
+
+  if (depthDelta > LOCAL_DEPTH_TOLERANCE_M) return LOCAL_LOCKOUT;
+  if (h2s > LOCAL_H2S_CRIT_PPM) return LOCAL_LOCKOUT;
+  if (o2 < LOCAL_O2_LOW_CRIT || o2 > LOCAL_O2_HIGH_CRIT) return LOCAL_LOCKOUT;
+
+  if (h2s > LOCAL_H2S_WARN_PPM) return LOCAL_WARNING;
+  if ((o2 >= LOCAL_O2_LOW_CRIT && o2 < LOCAL_O2_LOW_WARN) ||
+      (o2 > LOCAL_O2_HIGH_WARN && o2 <= LOCAL_O2_HIGH_CRIT)) {
+    return LOCAL_WARNING;
+  }
+
+  if (isWarmingUp) return LOCAL_WARMING;
+  return LOCAL_SAFE;
+}
+
+// Non-blocking buzzer driver: SAFE=off, LOCKOUT=continuous on,
+// WARNING/WARMING/UNKNOWN=intermittent beep.
+static void driveBuzzer(LocalSafetyState state) {
+  unsigned long now = millis();
+
+  switch (state) {
+    case LOCAL_SAFE:
+      digitalWrite(BUZZER_PIN, LOW);
+      buzzerOn = false;
+      return;
+    case LOCAL_LOCKOUT:
+      digitalWrite(BUZZER_PIN, HIGH);
+      buzzerOn = true;
+      return;
+    case LOCAL_WARNING:
+    case LOCAL_WARMING:
+    case LOCAL_UNKNOWN:
+    default: {
+      unsigned long elapsed = now - buzzerPatternStart;
+      unsigned long cycle = BUZZER_BEEP_ON_MS + BUZZER_BEEP_OFF_MS;
+      bool shouldBeOn = (elapsed % cycle) < BUZZER_BEEP_ON_MS;
+      if (shouldBeOn != buzzerOn) {
+        digitalWrite(BUZZER_PIN, shouldBeOn ? HIGH : LOW);
+        buzzerOn = shouldBeOn;
+      }
+      return;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Payload construction + signing.
+// ---------------------------------------------------------------------------
+
+// Builds the canonical `readings` object body (keys pre-sorted alphabetically
+// to match src/lib/canonicalize.ts): battery_percent, ch4_ppm, depth_meters,
+// h2s_ppm, is_warming_up, o2_percent, user_lat, user_lon, uv_index.
+static String buildCanonicalReadings(float h2sPPM, float o2Percent, float ch4PPM,
+                                     float depthMeters, float batteryPercent,
+                                     bool isWarmingUp, float uvIndex) {
+  String s = "{";
+  s += "\"battery_percent\":" + canonicalNumber(batteryPercent) + ",";
+  s += "\"ch4_ppm\":" + canonicalNumber(ch4PPM) + ",";
+  s += "\"depth_meters\":" + canonicalNumber(depthMeters) + ",";
+  s += "\"h2s_ppm\":" + canonicalNumber(h2sPPM) + ",";
+  s += "\"is_warming_up\":" + String(isWarmingUp ? "true" : "false") + ",";
+  s += "\"o2_percent\":" + canonicalNumber(o2Percent) + ",";
+  s += "\"user_lat\":" + canonicalNumber(PROBE_LAT) + ",";
+  s += "\"user_lon\":" + canonicalNumber(PROBE_LON) + ",";
+  s += "\"uv_index\":" + canonicalNumber(uvIndex);
+  s += "}";
+  return s;
+}
+
+// Builds the canonical top-level signed object (keys pre-sorted
+// alphabetically): device_id, readings, timestamp, work_order_id.
+static String buildCanonicalSignedPayload(const String& readingsJson, uint64_t timestampMs) {
+  String s = "{";
+  s += "\"device_id\":\"" + String(deviceId) + "\",";
+  s += "\"readings\":" + readingsJson + ",";
+  s += "\"timestamp\":" + canonicalNumber((double)timestampMs) + ",";
+  s += "\"work_order_id\":\"" + String(workOrderId) + "\"";
+  s += "}";
+  return s;
+}
+
+// Builds the final HTTP request body: the canonical signed object plus the
+// signature field appended (signature itself is not part of the signed
+// content).
+static String buildRequestBody(const String& canonicalSignedPayload, const String& signatureHex) {
+  String body = canonicalSignedPayload.substring(0, canonicalSignedPayload.length() - 1);
+  body += ",\"signature\":\"" + signatureHex + "\"}";
+  return body;
+}
+
+// ---------------------------------------------------------------------------
+// Wi-Fi + NTP + HTTP
 // ---------------------------------------------------------------------------
 
 static bool connectWiFi() {
@@ -286,49 +462,56 @@ static bool connectWiFi() {
   return true;
 }
 
-static bool postScanLog(const String& body) {
+// The backend rejects any reading whose timestamp is more than 30s from
+// real wall-clock time, so we need real epoch time via NTP. Requires the
+// Wi-Fi network to have outbound internet access.
+static bool syncTimeViaNTP() {
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  time_t now = time(nullptr);
+  unsigned long start = millis();
+  while (now < 8 * 3600 * 2) { // wait until clock looks like a real 2024+ epoch
+    if (millis() - start > NTP_SYNC_TIMEOUT_MS) {
+      return false;
+    }
+    delay(250);
+    now = time(nullptr);
+  }
+  return true;
+}
+
+static uint64_t currentEpochMillis() {
+  time_t now = time(nullptr);
+  return (uint64_t)now * 1000ULL;
+}
+
+static bool postIngest(const String& body) {
   HTTPClient http;
-  String url = String(apiBaseUrl) + "/scan_logs";
+  String url = String(apiBaseUrl) + "/api/telemetry/ingest";
   http.begin(url);
   http.addHeader("Content-Type", "application/json");
   http.setReuse(true);
 
   int code = http.POST(body);
+  if (code < 200 || code >= 300) {
+    Serial.printf("[PRANA] ingest rejected: HTTP %d body=%s\n", code, http.getString().c_str());
+  }
   http.end();
 
   return (code >= 200 && code < 300);
 }
 
 // ---------------------------------------------------------------------------
-// Heartbeat: small presence beacon proving the device is alive.
-// ---------------------------------------------------------------------------
-
-static void sendHeartbeat() {
-  StaticJsonDocument<128> doc;
-  doc["device_serial"] = deviceSerial;
-  doc["event"] = "heartbeat";
-  doc["timestamp"] = (uint64_t)millis();
-  String payload;
-  serializeJson(doc, payload);
-
-  String body = String("{\"payload\":") + payload +
-                ",\"signature\":\"" + hmacSha256(deviceSecret, payload.c_str()) + "\"}";
-
-  postScanLog(body);
-}
-
-// ---------------------------------------------------------------------------
-// Offline flush: push everything cached while Wi-Fi was down.
+// Offline flush: push everything cached while Wi-Fi/NTP was down.
+// FIFO order preserved; original signed timestamps are never regenerated.
 // ---------------------------------------------------------------------------
 
 static void flushRingBuffer() {
   String cached;
   while (ringBufferPop(cached)) {
-    if (postScanLog(cached)) {
-      // successfully transmitted, continue draining.
+    if (postIngest(cached)) {
+      // successfully transmitted, continue draining oldest-first.
     } else {
-      // Still failing, put it back and stop. Re-wi-fi will retry later.
-      ringBufferPush(cached);
+      ringBufferPush(cached); // retain and retry later; do not drop or resign.
       break;
     }
   }
@@ -339,82 +522,113 @@ static void flushRingBuffer() {
 // ---------------------------------------------------------------------------
 
 void setup() {
-  // ADC configuration.
   analogReadResolution(ADC_BITS);
   analogSetAttenuation(ADC_11db); // allow up to ~3.6V on ADC pins
 
-  // Sensor pins.
-  pinMode(H2S_SENSOR_PIN, INPUT);
-  pinMode(O2_SENSOR_PIN, INPUT);
-  pinMode(BATTERY_MONITOR_PIN, INPUT);
+  pinMode(MQ2_SENSOR_PIN, INPUT);
+  pinMode(MQ135_SENSOR_PIN, INPUT);
+  pinMode(UV_SENSOR_PIN, INPUT);
   pinMode(ULTRASONIC_TRIGGER_PIN, OUTPUT);
   pinMode(ULTRASONIC_ECHO_PIN, INPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(ULTRASONIC_TRIGGER_PIN, LOW);
+  digitalWrite(BUZZER_PIN, LOW);
 
-  // Initialize ring buffer memory.
   ringBufferClear();
+  bootMillis = millis();
+  buzzerPatternStart = millis();
 
   Serial.begin(115200);
   while (!Serial) { delay(10); }
   Serial.println("\n[PRANA] firmware starting");
 
-  if (!connectWiFi()) {
-    Serial.println("[PRANA] Wi-Fi connect failed; samples will be cached");
+  if (connectWiFi()) {
+    Serial.println("[PRANA] Wi-Fi connected");
+    timeSynced = syncTimeViaNTP();
+    Serial.println(timeSynced ? "[PRANA] NTP time synced" : "[PRANA] NTP sync FAILED — samples will be dropped until synced");
+  } else {
+    Serial.println("[PRANA] Wi-Fi connect failed; will retry in loop()");
   }
 }
 
 void loop() {
   unsigned long now = millis();
+  bool isWarmingUp = (now - bootMillis) < WARMUP_DURATION_MS;
 
-  // --- Heartbeat -------------------------------------------------------
-  if (now - lastHeartbeat >= HEARTBEAT_INTERVAL_MS) {
-    lastHeartbeat = now;
-    if (WiFi.status() == WL_CONNECTED) {
-      sendHeartbeat();
-      Serial.println("[PRANA] heartbeat sent");
-    } else if (connectWiFi()) {
-      sendHeartbeat();
-      Serial.println("[PRANA] heartbeat sent (after reconnect)");
-    } else {
-      Serial.println("[PRANA] heartbeat deferred (offline)");
-    }
+  // --- Connectivity maintenance ------------------------------------------
+  if (WiFi.status() != WL_CONNECTED) {
+    connectWiFi();
+  }
+  if (WiFi.status() == WL_CONNECTED && !timeSynced) {
+    timeSynced = syncTimeViaNTP();
   }
 
-  // --- Sampling loop ---------------------------------------------------
+  // --- Sampling loop -------------------------------------------------------
   if (now - lastSample >= SAMPLING_INTERVAL_MS) {
     lastSample = now;
 
-    float h2s    = sampleH2SPPM();
-    float o2     = sampleO2Percent();
-    float depth  = sampleUltrasonicDepthCM();
-    float batt   = readBatteryVoltage();
+    float mq2Voltage = readAnalogSensorVoltage(MQ2_SENSOR_PIN);
+    float h2s  = sampleH2SPPM(mq2Voltage);
+    float ch4  = sampleCH4PPM(mq2Voltage);
+    float o2   = sampleO2Percent();
+    float uv   = sampleUVIndex();
+    float depthCM = sampleUltrasonicDepthCM();
+    if (depthCM < 0) {
+      depthCM = (lastGoodDepthCM >= 0) ? lastGoodDepthCM : 0;
+    } else {
+      lastGoodDepthCM = depthCM;
+    }
+    float depthMeters = depthCM / 100.0f;
+    float battPct = BATTERY_PERCENT_PLACEHOLDER;
 
-    Serial.printf("[PRANA] H2S=%.2f ppm  O2=%.2f%%  depth=%.1f cm  battery=%.2f V\n",
-                  h2s, o2, depth, batt);
+    Serial.printf("[PRANA] H2S=%.2f ppm  O2=%.2f%%  CH4=%.2f ppm  UV=%.2f  depth=%.2f m  battery=%.1f%% (placeholder)  warming=%d\n",
+                  h2s, o2, ch4, uv, depthMeters, battPct, isWarmingUp);
 
-    String body = buildAndSignPayload(h2s, o2, depth, batt, now);
+    // Local advisory state drives the buzzer only. The server is always the
+    // sole authority for permits/lockouts — this never gates anything.
+    // currentLocalState is applied every loop() tick below, not just here,
+    // so the intermittent beep pattern actually toggles between samples.
+    currentLocalState = computeLocalState(h2s, o2, depthMeters, isWarmingUp);
 
-    if (WiFi.status() == WL_CONNECTED) {
-      if (postScanLog(body)) {
-        Serial.println("[PRANA] sample POSTed");
-        // After a successful send, flush any previously cached payloads.
-        if (ringCount > 0) {
-          flushRingBuffer();
+    if (!timeSynced) {
+      Serial.println("[PRANA] time not synced yet; dropping sample (would fail freshness check)");
+    } else {
+      uint64_t ts = currentEpochMillis();
+      String readingsJson = buildCanonicalReadings(h2s, o2, ch4, depthMeters, battPct, isWarmingUp, uv);
+      String canonicalPayload = buildCanonicalSignedPayload(readingsJson, ts);
+      String signature = hmacSha256Hex(deviceSecret, canonicalPayload);
+      String body = buildRequestBody(canonicalPayload, signature);
+
+      if (WiFi.status() == WL_CONNECTED) {
+        if (postIngest(body)) {
+          Serial.println("[PRANA] sample POSTed");
+          if (ringCount > 0) flushRingBuffer();
+        } else {
+          Serial.println("[PRANA] POST failed; caching payload");
+          ringBufferPush(body);
         }
       } else {
-        Serial.println("[PRANA] POST failed; caching payload");
-        ringBufferPush(body);
-      }
-    } else {
-      // No network: cache locally for later.
-      if (!ringBufferPush(body)) {
-        Serial.println("[PRANA] ring buffer full; payload dropped");
-      } else {
-        Serial.printf("[PRANA] payload cached (ringCount=%u)\n", ringCount);
+        if (!ringBufferPush(body)) {
+          Serial.println("[PRANA] ring buffer full; payload dropped");
+        } else {
+          Serial.printf("[PRANA] payload cached (ringCount=%u)\n", ringCount);
+        }
       }
     }
   }
 
-  // Yield to the RTOS Wi-Fi task.
-  delay(100);
+  // Drive the buzzer every loop() tick (not just at sample time) so the
+  // intermittent beep pattern for WARNING/WARMING/UNKNOWN actually toggles.
+  driveBuzzer(currentLocalState);
+
+  // --- Heartbeat (serial log only, not transmitted) -----------------------
+  if (now - lastHeartbeat >= HEARTBEAT_INTERVAL_MS) {
+    lastHeartbeat = now;
+    Serial.printf("[PRANA] heartbeat: wifi=%s time_synced=%s ring=%u\n",
+                  WiFi.status() == WL_CONNECTED ? "up" : "down",
+                  timeSynced ? "yes" : "no",
+                  (unsigned)ringCount);
+  }
+
+  delay(50);
 }
