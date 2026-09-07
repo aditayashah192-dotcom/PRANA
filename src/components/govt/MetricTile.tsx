@@ -45,7 +45,24 @@ export const MetricTile: React.FC<MetricTileProps> = ({
 }) => {
   const styles = TONE[tone]
   return (
-    <div className={['border-2', 'rounded-md', 'px-3', 'py-2', 'flex', 'flex-col', 'gap-1', styles.card].join(' ')}>
+    <div
+      className={[
+        'border-2',
+        'rounded-md',
+        'px-3',
+        'py-2',
+        'flex',
+        'flex-col',
+        'gap-1',
+        'shadow-panel',
+        'hover:shadow-panel-md',
+        'hover:-translate-y-px',
+        'transition-all',
+        'duration-150',
+        'ease-snappy',
+        styles.card,
+      ].join(' ')}
+    >
       <span className={['font-mono', 'text-[10px]', 'font-bold', 'uppercase', 'tracking-wider', styles.label].join(' ')}>
         {label}
       </span>

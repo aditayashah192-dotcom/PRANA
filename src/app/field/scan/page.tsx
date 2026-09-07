@@ -964,7 +964,7 @@ export default function FieldScanPage() {
 
   if (authLoading) {
     return (
-      <div className="min-h-screen bg-slate-50 p-4">
+      <div className="min-h-screen bg-prana-canvas p-4">
         <div className="mx-auto max-w-lg">
           <div className="border-2 border-zinc-200 rounded-md p-6 bg-white">
             <p className="font-mono text-sm text-slate-700">Authenticating...</p>
@@ -976,7 +976,7 @@ export default function FieldScanPage() {
 
   if (!user) {
     return (
-      <div className="min-h-screen bg-slate-50 p-4">
+      <div className="min-h-screen bg-prana-canvas p-4">
         <div className="mx-auto max-w-lg">
           <div className="border-2 border-zinc-200 rounded-md p-6 bg-white">
             <p className="font-mono text-sm text-slate-700">Authentication required.</p>
@@ -987,9 +987,9 @@ export default function FieldScanPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 p-4">
+    <div className="min-h-screen bg-prana-canvas p-4">
       <div className="mx-auto max-w-lg space-y-4">
-        <header className="border-2 border-zinc-200 rounded-md bg-slate-900 px-4 py-3 flex items-center justify-between gap-4">
+        <header className="border-2 border-zinc-200 rounded-md bg-slate-700 px-4 py-3 flex items-center justify-between gap-4 shadow-panel-md">
           <h1 className="text-lg font-bold font-mono uppercase tracking-wider text-slate-100">
             Field Supervisor Scan
           </h1>
@@ -997,7 +997,7 @@ export default function FieldScanPage() {
             <button
               type="button"
               onClick={signOut}
-              className="border-2 border-zinc-200 rounded-md px-3 py-1 font-mono text-xs font-bold uppercase tracking-wider text-slate-100 bg-slate-800 hover:bg-slate-700"
+              className="border-2 border-zinc-200 rounded-md px-3 py-1 font-mono text-xs font-bold uppercase tracking-wider text-slate-100 bg-slate-600 hover:bg-slate-500"
             >
               Sign Out
             </button>

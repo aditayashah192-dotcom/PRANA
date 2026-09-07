@@ -23,14 +23,25 @@ export const Panel: React.FC<PanelProps> = ({
 }) => {
   const border = tone === 'critical' ? 'border-red-600' : 'border-zinc-200'
   const headerBorder = tone === 'critical' ? 'border-red-700' : 'border-zinc-200'
-  const headerBg = tone === 'critical' ? 'bg-red-700' : 'bg-slate-900'
+  const headerBg = tone === 'critical' ? 'bg-red-700' : 'bg-slate-700'
   const titleColor = tone === 'critical' ? 'text-red-50' : 'text-slate-100'
   const subtitleColor = tone === 'critical' ? 'text-red-200' : 'text-amber-400'
   const bodyPad = noPadding ? '' : density === 'dense' ? 'p-3' : 'p-4'
 
   return (
     <section
-      className={['border-2', border, 'rounded-md', 'bg-white', 'overflow-hidden', className].join(' ')}
+      className={[
+        'border-2',
+        border,
+        'rounded-md',
+        'bg-white',
+        'overflow-hidden',
+        'shadow-panel',
+        'transition-shadow',
+        'duration-150',
+        'hover:shadow-panel-md',
+        className,
+      ].join(' ')}
     >
       <header
         className={[

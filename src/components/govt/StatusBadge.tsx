@@ -38,6 +38,8 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({
         'py-0.5',
         'rounded-md',
         'border',
+        'transition-colors',
+        'duration-150',
         'font-mono',
         'text-[10px]',
         'font-bold',

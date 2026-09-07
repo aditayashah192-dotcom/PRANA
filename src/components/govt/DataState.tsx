@@ -31,6 +31,7 @@ export const DataState: React.FC<DataStateProps> = ({
         'text-xs',
         'uppercase',
         'tracking-wider',
+        'shadow-panel',
         TONE[state],
       ].join(' ')}
     >

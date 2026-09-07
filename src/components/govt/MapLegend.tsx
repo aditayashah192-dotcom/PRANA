@@ -10,7 +10,7 @@ const SAFETY_ROWS: Array<{ state: string; color: string; description: string }> 
 
 export const MapLegend: React.FC = () => {
   return (
-    <div className="border-2 border-zinc-200 rounded-md bg-white p-3">
+    <div className="border-2 border-zinc-200 rounded-md bg-white p-3 shadow-panel">
       <p className="font-mono text-[10px] font-bold uppercase tracking-wider text-slate-700 mb-2">
         MAP_LEGEND
       </p>

@@ -581,7 +581,7 @@ export default function GovtDashboardPage() {
 
   if (authLoading) {
     return (
-      <div className="min-h-screen bg-slate-50 p-4">
+      <div className="min-h-screen bg-prana-canvas p-4">
         <div className="mx-auto max-w-7xl">
           <div className="border-2 border-zinc-200 rounded-md bg-white p-6">
             <p className="font-mono text-sm uppercase tracking-wider text-slate-700">AUTHENTICATING...</p>
@@ -593,7 +593,7 @@ export default function GovtDashboardPage() {
 
   if (!user) {
     return (
-      <div className="min-h-screen bg-slate-50 p-4">
+      <div className="min-h-screen bg-prana-canvas p-4">
         <div className="mx-auto max-w-7xl">
           <div className="border-2 border-zinc-200 rounded-md bg-white p-6">
             <p className="font-mono text-sm uppercase tracking-wider text-slate-700">AUTHENTICATION_REQUIRED</p>
@@ -605,7 +605,7 @@ export default function GovtDashboardPage() {
 
   if (roleError) {
     return (
-      <div className="min-h-screen bg-slate-50 p-4">
+      <div className="min-h-screen bg-prana-canvas p-4">
         <div className="mx-auto max-w-7xl">
           <div className="border-2 border-red-600 rounded-md bg-white p-6">
             <p className="font-mono text-sm font-bold uppercase tracking-wider text-red-700">AUTHORIZATION_ERROR</p>
@@ -619,7 +619,7 @@ export default function GovtDashboardPage() {
   return (
     <div className="min-h-screen bg-slate-100 p-3">
       <div className="mx-auto max-w-7xl space-y-3">
-        <header className="border-2 border-zinc-900 rounded-md bg-slate-900 px-4 py-3 flex items-center justify-between gap-4">
+        <header className="border-2 border-zinc-200 rounded-md bg-slate-700 px-4 py-3 flex items-center justify-between gap-4 shadow-panel-md">
           <div className="flex items-center gap-3 min-w-0">
             <div className="w-2 h-10 bg-amber-500 rounded-sm shrink-0" aria-hidden="true" />
             <div className="min-w-0">
@@ -638,7 +638,7 @@ export default function GovtDashboardPage() {
             <button
               type="button"
               onClick={signOut}
-              className="border-2 border-zinc-200 rounded-md px-3 py-1 font-mono text-xs font-bold uppercase tracking-wider text-slate-100 bg-slate-800 hover:bg-slate-700"
+              className="border-2 border-zinc-200 rounded-md px-3 py-1 font-mono text-xs font-bold uppercase tracking-wider text-slate-100 bg-slate-600 hover:bg-slate-500"
             >
               Sign Out
             </button>

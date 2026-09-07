@@ -71,7 +71,7 @@ export const WorkzoneDetailPanel: React.FC<WorkzoneDetailPanelProps> = ({
       : 'red'
 
   return (
-    <div className="border-2 border-zinc-200 rounded-md bg-white overflow-hidden">
+    <div className="border-2 border-zinc-200 rounded-md bg-white overflow-hidden shadow-panel">
       <div className="px-3 py-2 border-b-2 border-zinc-200 bg-slate-900 flex items-center justify-between">
         <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-slate-100">
           ZONE_DETAIL
@@ -134,25 +134,25 @@ export const WorkzoneDetailPanel: React.FC<WorkzoneDetailPanelProps> = ({
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-          <div className="border-2 border-zinc-200 rounded-md bg-white p-2">
+          <div className="border-2 border-zinc-200 rounded-md bg-white p-2 shadow-panel">
             <p className="font-mono text-[10px] uppercase tracking-wider text-slate-600">LAT</p>
             <p className="font-mono text-sm text-slate-900">
               {workzone.target_lat.toFixed(6)}
             </p>
           </div>
-          <div className="border-2 border-zinc-200 rounded-md bg-white p-2">
+          <div className="border-2 border-zinc-200 rounded-md bg-white p-2 shadow-panel">
             <p className="font-mono text-[10px] uppercase tracking-wider text-slate-600">LON</p>
             <p className="font-mono text-sm text-slate-900">
               {workzone.target_lon.toFixed(6)}
             </p>
           </div>
-          <div className="border-2 border-zinc-200 rounded-md bg-white p-2">
+          <div className="border-2 border-zinc-200 rounded-md bg-white p-2 shadow-panel">
             <p className="font-mono text-[10px] uppercase tracking-wider text-slate-600">TARGET_DEPTH</p>
             <p className="font-mono text-sm text-slate-900">
               {fmt(workzone.target_depth_meters, 'm')}
             </p>
           </div>
-          <div className="border-2 border-zinc-200 rounded-md bg-white p-2">
+          <div className="border-2 border-zinc-200 rounded-md bg-white p-2 shadow-panel">
             <p className="font-mono text-[10px] uppercase tracking-wider text-slate-600">FRESHNESS</p>
             <div className="mt-1">
               <StatusBadge

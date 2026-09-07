@@ -84,6 +84,10 @@ const MetricCard: React.FC<MetricCardProps> = ({
         'flex-col',
         'gap-2',
         'min-w-0',
+        'shadow-panel',
+        'transition-shadow',
+        'duration-150',
+        'hover:shadow-panel-md',
         styles.card,
       ].join(' ')}
     >

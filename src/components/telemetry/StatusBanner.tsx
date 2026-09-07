@@ -81,6 +81,7 @@ export const StatusBanner: React.FC<StatusBannerProps> = ({
     'uppercase',
     'tracking-wider',
     'select-none',
+    'shadow-panel',
     style.bg,
     style.border,
     style.text,

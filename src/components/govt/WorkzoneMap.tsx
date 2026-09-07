@@ -245,7 +245,7 @@ export const WorkzoneMap: React.FC<WorkzoneMapProps> = ({
   )
 
   return (
-    <div className="border-2 border-zinc-200 rounded-md bg-white overflow-hidden">
+    <div className="border-2 border-zinc-200 rounded-md bg-white overflow-hidden shadow-panel">
       <div className="px-3 py-2 border-b-2 border-zinc-200 bg-slate-900 flex items-center justify-between">
         <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-slate-100">
           CITY_OPERATIONS_MAP

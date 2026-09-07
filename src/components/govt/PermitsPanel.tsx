@@ -66,7 +66,22 @@ export const PermitsPanel: React.FC<PermitsPanelProps> = ({
               ? 'border-amber-500 bg-amber-500 text-amber-50'
               : 'border-zinc-300 bg-zinc-100 text-zinc-800'
           return (
-            <div key={status} className={['border-2', 'rounded-md', 'px-3', 'py-2', accent].join(' ')}>
+            <div
+              key={status}
+              className={[
+                'border-2',
+                'rounded-md',
+                'px-3',
+                'py-2',
+                'shadow-panel',
+                'hover:shadow-panel-md',
+                'hover:-translate-y-px',
+                'transition-all',
+                'duration-150',
+                'ease-snappy',
+                accent,
+              ].join(' ')}
+            >
               <span className="font-mono text-[10px] font-bold uppercase tracking-wider opacity-90">
                 {status}
               </span>

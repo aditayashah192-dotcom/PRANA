@@ -20,9 +20,12 @@ const BASE = [
   'tracking-wider',
   'rounded-md',
   'border-2',
-  'transition-colors',
+  'shadow-panel',
+  'hover:shadow-panel-md',
+  'active:shadow-none',
   'disabled:cursor-not-allowed',
   'disabled:opacity-50',
+  'disabled:shadow-none',
   'select-none',
 ]
 
@@ -72,6 +75,8 @@ const VARIANT: Record<Variant, string> = {
     'text-slate-700',
     'hover:bg-slate-100',
     'active:bg-slate-200',
+    'shadow-none',
+    'hover:shadow-none',
   ].join(' '),
 }
 
