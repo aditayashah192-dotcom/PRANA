@@ -16,7 +16,6 @@ type LatestTelemetryResponse = {
   battery: number | null
   created_at: string | null
   decision: string | null
-  compliance_reason: string | null
 }
 
 function badRequest(message: string): Response {
@@ -79,7 +78,7 @@ export async function GET(request: NextRequest): Promise<Response> {
 
   const { data: scanLog, error: scanLogError } = await supabase
     .from('scan_logs')
-    .select('id, device_id, work_order_id, readings, created_at, timestamp, decision, compliance_reason')
+    .select('id, device_id, work_order_id, readings, created_at, timestamp, decision')
     .eq('device_id', deviceId)
     .order('timestamp', { ascending: false, nullsFirst: false })
     .limit(1)
@@ -91,7 +90,6 @@ export async function GET(request: NextRequest): Promise<Response> {
       created_at: string
       timestamp: string | null
       decision: string | null
-      compliance_reason: string | null
     }>()
 
   if (scanLogError) {
@@ -119,7 +117,6 @@ export async function GET(request: NextRequest): Promise<Response> {
     battery: toNumber(readings.battery_percent ?? null),
     created_at: scanLog.created_at,
     decision: scanLog.decision,
-    compliance_reason: scanLog.compliance_reason,
   }
 
   return NextResponse.json(payload)

@@ -61,7 +61,6 @@ interface TelemetryRow {
   battery: number | null
   created_at: string
   decision: string | null
-  compliance_reason: string | null
 }
 
 interface AuthoritativeState {
